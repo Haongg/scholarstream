@@ -1,0 +1,5 @@
+httpx
+boto3
+psycopg[binary]
+python-dotenv
+pytest
