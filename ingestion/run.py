@@ -12,7 +12,7 @@ import argparse
 import logging
 import os
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from dotenv import load_dotenv
 
@@ -50,7 +50,7 @@ def main(argv=None) -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)  # request URLs are noisy and carry credentials
     args = parse_args(argv)
 
-    yesterday = datetime.now(timezone.utc).date() - timedelta(days=1)  # today is still incomplete
+    yesterday = datetime.now(UTC).date() - timedelta(days=1)  # today is still incomplete
     end = args.end or yesterday
 
     with connect() as conn:
