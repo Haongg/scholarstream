@@ -6,8 +6,10 @@ import os
 from datetime import date
 
 import boto3
+from botocore.exceptions import ClientError
 
 BRONZE_BUCKET = "bronze"
+SUCCESS_MARKER = "_SUCCESS"  # written last; a partition without it is partial and must not be read
 
 
 def s3_client():
@@ -30,7 +32,8 @@ class BronzeWriter:
         return f"works/publication_date={day.isoformat()}/"
 
     def clear_day(self, day: date) -> None:
-        """Remove existing pages so a re-run replaces the partition instead of mixing with it."""
+        """Remove existing pages and the marker so a re-run replaces the partition instead of
+        mixing with it; until mark_complete runs again the day counts as incomplete."""
         paginator = self.s3.get_paginator("list_objects_v2")
         for listing in paginator.paginate(Bucket=self.bucket, Prefix=self.prefix(day)):
             keys = [{"Key": o["Key"]} for o in listing.get("Contents", [])]
@@ -42,3 +45,16 @@ class BronzeWriter:
         body = gzip.compress(json.dumps(page).encode("utf-8"))
         self.s3.put_object(Bucket=self.bucket, Key=key, Body=body)
         return key
+
+    def mark_complete(self, day: date) -> None:
+        """Flag the partition as fully written and reconciled; readers only trust flagged days."""
+        self.s3.put_object(Bucket=self.bucket, Key=self.prefix(day) + SUCCESS_MARKER, Body=b"")
+
+    def is_complete(self, day: date) -> bool:
+        try:
+            self.s3.head_object(Bucket=self.bucket, Key=self.prefix(day) + SUCCESS_MARKER)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] in ("404", "NoSuchKey", "NotFound"):
+                return False
+            raise
+        return True

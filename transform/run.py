@@ -4,6 +4,8 @@
     python -m transform.run --from 2026-10-01 --to 2026-10-03
 
 Each day's silver files are overwritten in place, so re-running a day never duplicates rows.
+Only bronze days carrying the _SUCCESS marker are read; a partial partition (ingestion
+stopped mid-day) is skipped with a warning so silver is never built from incomplete data.
 """
 
 import argparse
@@ -17,7 +19,7 @@ from datetime import date
 import polars as pl
 from dotenv import load_dotenv
 
-from ingestion.bronze_writer import BRONZE_BUCKET, s3_client
+from ingestion.bronze_writer import BRONZE_BUCKET, BronzeWriter, s3_client
 from transform.silver import to_tables
 
 SILVER_BUCKET = "silver"
@@ -42,7 +44,9 @@ def read_day(s3, day: date) -> list[dict]:
     works = []
     for listing in s3.get_paginator("list_objects_v2").paginate(Bucket=BRONZE_BUCKET, Prefix=prefix):
         for obj in listing.get("Contents", []):
-            body = s3.get_object(Bucket=BRONZE_BUCKET, Key=obj["Key"])["Body"].read()
+            if not obj["Key"].endswith(".json.gz"):
+                continue  # the _SUCCESS marker
+            body =s3.get_object(Bucket=BRONZE_BUCKET, Key=obj["Key"])["Body"].read()
             works.extend(json.loads(gzip.decompress(body))["results"])
     return works
 
@@ -71,6 +75,11 @@ def main(argv=None) -> int:
 
     s3 = s3_client()
     days = [d for d in bronze_days(s3) if (not args.start or d >= args.start) and (not args.end or d <= args.end)]
+    bronze = BronzeWriter(s3)
+    incomplete = [d for d in days if not bronze.is_complete(d)]
+    for day in incomplete:
+        log.warning("Skipping %s: bronze partition has no _SUCCESS marker (partial load)", day)
+    days = [d for d in days if d not in incomplete]
     if not days:
         log.info("No bronze partitions in range")
         return 0
