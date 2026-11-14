@@ -52,21 +52,10 @@ def try_read(s3, table: str, day: date) -> tuple[pl.DataFrame | None, str | None
         return None, f"{table}: unreadable parquet ({type(error).__name__})"
 
 
-def main(argv=None) -> int:
-    load_dotenv()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--from", dest="start", type=date.fromisoformat)
-    parser.add_argument("--to", dest="end", type=date.fromisoformat)
-    args = parser.parse_args(argv)
-
-    s3 = s3_client()
+def gate(s3, days: list[date]) -> bool:
+    """Check the given silver days; True if every check passed. Used by the CLI and the DAG."""
     today = datetime.now(UTC).date()
     all_days = silver_days(s3)
-    days = [d for d in all_days if (not args.start or d >= args.start) and (not args.end or d <= args.end)]
-    if not days:
-        log.info("No silver partitions in range")
-        return 0
 
     # Row counts of every earlier day, so a day is judged against the days before it.
     # A day whose works table cannot be read is left out of the baseline.
@@ -101,9 +90,25 @@ def main(argv=None) -> int:
                 log.info("ok   %s", name)
     if failed:
         log.error("Quality gate FAILED: do not promote to gold")
-        return 1
+        return False
     log.info("Quality gate passed")
-    return 0
+    return True
+
+
+def main(argv=None) -> int:
+    load_dotenv()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--from", dest="start", type=date.fromisoformat)
+    parser.add_argument("--to", dest="end", type=date.fromisoformat)
+    args = parser.parse_args(argv)
+
+    s3 = s3_client()
+    days = [d for d in silver_days(s3) if (not args.start or d >= args.start) and (not args.end or d <= args.end)]
+    if not days:
+        log.info("No silver partitions in range")
+        return 0
+    return 0 if gate(s3, days) else 1
 
 
 if __name__ == "__main__":
