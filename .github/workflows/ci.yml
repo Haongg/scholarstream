@@ -27,3 +27,26 @@ jobs:
 
       - name: Test
         run: python -m pytest
+
+  # Airflow pins shared libraries (e.g. polars) through its constraints file, so the DAGs and
+  # the whole suite also run in that environment: it is what the containers actually use.
+  dags:
+    runs-on: ubuntu-latest
+    env:
+      AIRFLOW_VERSION: "3.3.2"
+      PYTHON_VERSION: "3.14"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install Airflow with constraints
+        run: >
+          pip install -r requirements-airflow.txt -r requirements.txt
+          -c https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt
+
+      - name: Test (DAGs + pipeline under Airflow's pins)
+        run: python -m pytest
