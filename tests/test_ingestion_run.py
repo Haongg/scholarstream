@@ -4,6 +4,7 @@ from datetime import date
 
 import pytest
 
+from ingestion import run
 from ingestion.run import (
     CountMismatch,
     ingest_day,
@@ -149,3 +150,24 @@ def test_watermark_older_than_lookback_wins():
 
 def test_lookback_zero_starts_after_watermark():
     assert resolve_start(last_loaded=date(2026, 10, 19), end=END, lookback_days=0) == END
+
+
+@pytest.mark.parametrize(
+    "outcome, code",
+    [
+        (run.IngestResult(loaded=[DAY]), 0),
+        (run.NoWatermark("none"), 1),
+        (run.IngestResult(budget_exhausted=True), 2),
+        (CountMismatch("off"), 3),
+    ],
+)
+def test_cli_exit_codes(monkeypatch, outcome, code):
+    def fake_ingest(start, end):
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(run, "ingest", fake_ingest)
+    monkeypatch.setattr(run, "load_dotenv", lambda: None)
+
+    assert run.main([]) == code

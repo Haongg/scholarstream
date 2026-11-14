@@ -23,6 +23,7 @@ import argparse
 import logging
 import os
 import sys
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
 from dotenv import load_dotenv
@@ -93,6 +94,55 @@ def ingest_day_with_retry(client: OpenAlexClient, writer: BronzeWriter, day: dat
     raise RuntimeError("unreachable")
 
 
+class NoWatermark(Exception):
+    """No start date given and nothing loaded yet, so there is nothing to continue from."""
+
+
+@dataclass
+class IngestResult:
+    loaded: list[date] = field(default_factory=list)  # days written, reconciled and marked
+    budget_exhausted: bool = False  # stopped early; the remaining days wait for the next run
+
+
+def ingest(start: date | None = None, end: date | None = None) -> IngestResult:
+    """Load [start, end] into bronze. Used by the CLI below and by the Airflow DAG.
+
+    start defaults to the lookback window / watermark, end to yesterday (UTC).
+    Raises NoWatermark, or CountMismatch when a day still disagrees after its retry.
+    """
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # request URLs are noisy and carry credentials
+    yesterday = datetime.now(UTC).date() - timedelta(days=1)  # today is still incomplete
+    end = end or yesterday
+    result = IngestResult()
+
+    with connect() as conn:
+        watermark = Watermark(conn)
+        if start is None:
+            last = watermark.get()
+            if last is None:
+                raise NoWatermark("No watermark yet: pass --from YYYY-MM-DD for the first load")
+            lookback = int(os.getenv("INGEST_LOOKBACK_DAYS") or DEFAULT_LOOKBACK_DAYS)
+            start = resolve_start(last, end, lookback)
+        if start > end:
+            log.info("Nothing to load (start %s is after end %s)", start, end)
+            return result
+
+        client = OpenAlexClient(os.getenv("OPENALEX_API_KEY"), os.getenv("OPENALEX_MAILTO"))
+        writer = BronzeWriter()
+        for day in daterange(start, end):
+            try:
+                works = ingest_day_with_retry(client, writer, day)
+            except BudgetExhausted as exc:
+                log.warning("Stopping at %s: %s. Re-run after the budget resets.", day, exc)
+                result.budget_exhausted = True
+                return result
+            # A CountMismatch propagates: the watermark stays put, so the next run redoes the day.
+            watermark.advance(day)
+            result.loaded.append(day)
+            log.info("Loaded %s: %d works", day, works)
+    return result
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--from", dest="start", type=date.fromisoformat)
@@ -103,41 +153,16 @@ def parse_args(argv):
 def main(argv=None) -> int:
     load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    logging.getLogger("httpx").setLevel(logging.WARNING)  # request URLs are noisy and carry credentials
     args = parse_args(argv)
-
-    yesterday = datetime.now(UTC).date() - timedelta(days=1)  # today is still incomplete
-    end = args.end or yesterday
-
-    with connect() as conn:
-        watermark = Watermark(conn)
-        start = args.start
-        if start is None:
-            last = watermark.get()
-            if last is None:
-                log.error("No watermark yet: pass --from YYYY-MM-DD for the first load")
-                return 1
-            lookback = int(os.getenv("INGEST_LOOKBACK_DAYS") or DEFAULT_LOOKBACK_DAYS)
-            start = resolve_start(last, end, lookback)
-        if start > end:
-            log.info("Nothing to load (start %s is after end %s)", start, end)
-            return 0
-
-        client = OpenAlexClient(os.getenv("OPENALEX_API_KEY"), os.getenv("OPENALEX_MAILTO"))
-        writer = BronzeWriter()
-        for day in daterange(start, end):
-            try:
-                works = ingest_day_with_retry(client, writer, day)
-            except BudgetExhausted as exc:
-                log.warning("Stopping at %s: %s. Re-run after the budget resets.", day, exc)
-                return 2
-            except CountMismatch as exc:
-                # Watermark stays put, so the next run redoes this day.
-                log.error("Stopping: %s", exc)
-                return 3
-            watermark.advance(day)
-            log.info("Loaded %s: %d works", day, works)
-    return 0
+    try:
+        result = ingest(args.start, args.end)
+    except NoWatermark as exc:
+        log.error("%s", exc)
+        return 1
+    except CountMismatch as exc:
+        log.error("Stopping: %s", exc)
+        return 3
+    return 2 if result.budget_exhausted else 0
 
 
 if __name__ == "__main__":
