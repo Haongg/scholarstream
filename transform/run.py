@@ -2,6 +2,7 @@
 
     python -m transform.run                                  # every day found in bronze
     python -m transform.run --from 2026-10-01 --to 2026-10-03
+    python -m transform.run --stale                          # only days reloaded since silver was built
 
 Each day's silver files are overwritten in place, so re-running a day never duplicates rows.
 Only bronze days carrying the _SUCCESS marker are read; a partial partition (ingestion
@@ -14,12 +15,17 @@ import io
 import json
 import logging
 import sys
-from datetime import date
+from datetime import date, datetime
 
 import polars as pl
 from dotenv import load_dotenv
 
-from ingestion.bronze_writer import BRONZE_BUCKET, BronzeWriter, s3_client
+from ingestion.bronze_writer import (
+    BRONZE_BUCKET,
+    BronzeWriter,
+    last_modified,
+    s3_client,
+)
 from transform.silver import to_tables
 
 SILVER_BUCKET = "silver"
@@ -65,27 +71,57 @@ def transform_day(s3, day: date) -> tuple[int, int]:
     return len(works), len(work_topics)
 
 
+def complete_days(s3, start: date | None = None, end: date | None = None) -> dict[date, datetime]:
+    """Bronze days in range that carry the _SUCCESS marker, with the marker's write time."""
+    bronze = BronzeWriter(s3)
+    complete = {}
+    for day in bronze_days(s3):
+        if (start and day < start) or (end and day > end):
+            continue
+        marked = bronze.completed_at(day)
+        if marked is None:
+            log.warning("Skipping %s: bronze partition has no _SUCCESS marker (partial load)", day)
+        else:
+            complete[day] = marked
+    return complete
+
+
+def stale_days(s3) -> list[date]:
+    """Complete bronze days whose silver is missing or older than the latest bronze load.
+
+    Derived from storage rather than from whichever run triggered us, so a day loaded by a
+    run that later failed (and so never announced it) is still picked up next time.
+    work_topics is written last, so its timestamp is when the day's silver was finished.
+    """
+    stale = []
+    for day, marked in complete_days(s3).items():
+        built = last_modified(s3, SILVER_BUCKET, f"work_topics/{PARTITION}{day.isoformat()}/work_topics.parquet")
+        if built is None or built <= marked:  # <= : S3 timestamps are coarse; a redo is harmless
+            stale.append(day)
+    return stale
+
+
+def transform_days(s3, days: list[date]) -> None:
+    for day in days:
+        works, topics = transform_day(s3, day)
+        log.info("Silver %s: %d works, %d work_topics", day, works, topics)
+
+
 def main(argv=None) -> int:
     load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser()
     parser.add_argument("--from", dest="start", type=date.fromisoformat)
     parser.add_argument("--to", dest="end", type=date.fromisoformat)
+    parser.add_argument("--stale", action="store_true", help="only days whose bronze is newer than silver")
     args = parser.parse_args(argv)
 
     s3 = s3_client()
-    days = [d for d in bronze_days(s3) if (not args.start or d >= args.start) and (not args.end or d <= args.end)]
-    bronze = BronzeWriter(s3)
-    incomplete = [d for d in days if not bronze.is_complete(d)]
-    for day in incomplete:
-        log.warning("Skipping %s: bronze partition has no _SUCCESS marker (partial load)", day)
-    days = [d for d in days if d not in incomplete]
+    days = stale_days(s3) if args.stale else sorted(complete_days(s3, args.start, args.end))
     if not days:
-        log.info("No bronze partitions in range")
+        log.info("No bronze partitions to transform")
         return 0
-    for day in days:
-        works, topics = transform_day(s3, day)
-        log.info("Silver %s: %d works, %d work_topics", day, works, topics)
+    transform_days(s3, days)
     return 0
 
 

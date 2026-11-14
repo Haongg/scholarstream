@@ -3,7 +3,7 @@
 import gzip
 import json
 import os
-from datetime import date
+from datetime import date, datetime
 
 import boto3
 from botocore.exceptions import ClientError
@@ -50,11 +50,19 @@ class BronzeWriter:
         """Flag the partition as fully written and reconciled; readers only trust flagged days."""
         self.s3.put_object(Bucket=self.bucket, Key=self.prefix(day) + SUCCESS_MARKER, Body=b"")
 
+    def completed_at(self, day: date) -> datetime | None:
+        """When the day was last fully loaded (the marker's write time), or None if partial."""
+        return last_modified(self.s3, self.bucket, self.prefix(day) + SUCCESS_MARKER)
+
     def is_complete(self, day: date) -> bool:
-        try:
-            self.s3.head_object(Bucket=self.bucket, Key=self.prefix(day) + SUCCESS_MARKER)
-        except ClientError as exc:
-            if exc.response["Error"]["Code"] in ("404", "NoSuchKey", "NotFound"):
-                return False
-            raise
-        return True
+        return self.completed_at(day) is not None
+
+
+def last_modified(s3, bucket: str, key: str) -> datetime | None:
+    """An object's write time, or None if it does not exist."""
+    try:
+        return s3.head_object(Bucket=bucket, Key=key)["LastModified"]
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] in ("404", "NoSuchKey", "NotFound"):
+            return None
+        raise
