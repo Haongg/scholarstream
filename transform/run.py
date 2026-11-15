@@ -5,6 +5,7 @@
     python -m transform.run --stale                          # only days reloaded since silver was built
 
 Each day's silver files are overwritten in place, so re-running a day never duplicates rows.
+Rewriting a day removes its quality marker, so the gate must pass it again.
 Only bronze days carrying the _SUCCESS marker are read; a partial partition (ingestion
 stopped mid-day) is skipped with a warning so silver is never built from incomplete data.
 """
@@ -30,6 +31,12 @@ from transform.silver import to_tables
 
 SILVER_BUCKET = "silver"
 PARTITION = "publication_date="
+# Written by the quality gate when a day passes; gold reads only days that carry it.
+QUALITY_MARKER = "_QUALITY_OK"
+
+
+def quality_marker_key(day: date) -> str:
+    return f"works/{PARTITION}{day.isoformat()}/{QUALITY_MARKER}"
 
 log = logging.getLogger("transform")
 
@@ -66,6 +73,9 @@ def write_table(s3, table: str, day: date, df: pl.DataFrame) -> None:
 
 def transform_day(s3, day: date) -> tuple[int, int]:
     works, work_topics = to_tables(read_day(s3, day))
+    # The day's silver is about to change, so its earlier quality pass no longer holds. Removed
+    # first: if the writes below fail halfway, the day is left unchecked, never falsely passed.
+    s3.delete_object(Bucket=SILVER_BUCKET, Key=quality_marker_key(day))
     write_table(s3, "works", day, works)
     write_table(s3, "work_topics", day, work_topics)
     return len(works), len(work_topics)

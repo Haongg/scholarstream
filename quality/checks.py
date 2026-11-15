@@ -1,14 +1,14 @@
 """Data quality checks on the silver tables. Each check returns a list of problems (empty = passed)."""
 
 import statistics
-from datetime import date
+from datetime import date, timedelta
 
 import polars as pl
 
 MAX_RANK = 3
 ROW_COUNT_MIN_RATIO = 0.5
 ROW_COUNT_MAX_RATIO = 2.0
-ROW_COUNT_WINDOW = 7  # previous days used as the baseline
+ROW_COUNT_WEEKS = 4  # the same weekday of this many previous weeks is the baseline
 
 
 def check_work_id(works: pl.DataFrame) -> list[str]:
@@ -67,20 +67,36 @@ def check_publication_date(works: pl.DataFrame, day: date, today: date) -> list[
     return problems
 
 
-def check_row_count(count: int, previous_counts: list[int]) -> list[str]:
-    """Flag an empty day, or one far from the median of recent days. Band skipped without a baseline."""
+def row_count_baseline(day: date, counts: dict[date, int]) -> list[int]:
+    """Works counts of the same weekday in the previous ROW_COUNT_WEEKS weeks.
+
+    Works per day follow a weekly cycle (weekends about half of weekdays), so a trailing
+    window of plain days puts weekends near the lower bound. The 1st of a month is left out
+    of the baseline because it runs high (likely works with only a month as their date).
+    """
+    weeks_back = (day - timedelta(weeks=w) for w in range(1, ROW_COUNT_WEEKS + 1))
+    return [counts[d] for d in weeks_back if d in counts and d.day != 1]
+
+
+def check_row_count(day: date, count: int, counts: dict[date, int]) -> list[str]:
+    """Flag an empty day, or one far from the median of the same weekday in previous weeks.
+
+    `counts` holds works per day for any days; only the baseline days are used. The band is
+    skipped without a baseline, and its upper bound on the 1st of a month (see above).
+    """
     if count == 0:
         return ["silver has 0 works for this day"]
-    baseline = previous_counts[-ROW_COUNT_WINDOW:]
+    baseline = row_count_baseline(day, counts)
     if not baseline:
         return []
     median = statistics.median(baseline)
     low, high = median * ROW_COUNT_MIN_RATIO, median * ROW_COUNT_MAX_RATIO
-    if not low <= count <= high:
+    too_high = count > high and day.day != 1
+    if count < low or too_high:
         message = (
             f"{count} works is outside {low:.0f}..{high:.0f} "
             f"({ROW_COUNT_MIN_RATIO:.0%}-{ROW_COUNT_MAX_RATIO:.0%} of the median {median:.0f} "
-            f"over the last {len(baseline)} days)"
+            f"of the same weekday over the previous {len(baseline)} weeks)"
         )
         return [message]
     return []
@@ -91,13 +107,13 @@ def run_checks(
     topics: pl.DataFrame,
     day: date,
     today: date,
-    previous_counts: list[int],
+    counts: dict[date, int],
 ) -> dict[str, list[str]]:
-    """Run every check for one day and return {check name: problems}."""
+    """Run every check for one day and return {check name: problems}. `counts`: works per day."""
     return {
         "work_id not null and unique": check_work_id(works),
         "topics reference works": check_topics_reference_works(works, topics),
         "topics shape": check_topics_shape(works, topics),
         "publication date": check_publication_date(works, day, today),
-        "row count vs recent days": check_row_count(len(works), previous_counts),
+        "row count vs same weekday": check_row_count(day, len(works), counts),
     }

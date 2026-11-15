@@ -7,13 +7,20 @@ several bronze events collapsed into one run need no merging.
 
 SILVER_WORKS is emitted by the quality gate, not by transform, so downstream (gold) only
 starts on silver that passed. A failed gate fails the run without retrying.
+
+The gate checks every silver day without a _QUALITY_OK marker, not just the days this run
+transformed: transform has already written a failed day's silver, so on the next run it is
+no longer stale, yet it must still not count as passed.
 """
 
-from datetime import UTC, date, datetime
+import logging
+from datetime import UTC, datetime
 
 from airflow.sdk import dag, get_current_context, task
 from airflow.sdk.exceptions import AirflowFailException, AirflowSkipException
 from scholarstream_assets import BRONZE_WORKS, SILVER_WORKS
+
+log = logging.getLogger(__name__)
 
 
 @dag(
@@ -37,14 +44,18 @@ def bronze_to_silver():
         return [d.isoformat() for d in days]
 
     @task(outlets=[SILVER_WORKS])
-    def quality_gate(days: list[str]) -> None:
+    def quality_gate(transformed: list[str]) -> None:
         from ingestion.bronze_writer import s3_client
-        from quality.run import gate
+        from quality.run import gate, unchecked_days
 
-        if not days:
-            raise AirflowSkipException("No stale days: silver is already up to date")  # no event
-        if not gate(s3_client(), [date.fromisoformat(d) for d in days]):
-            raise AirflowFailException(f"Quality gate failed for {days}; see log. Not promoting.")
+        s3 = s3_client()
+        pending = unchecked_days(s3)
+        log.info("Transformed %d day(s); %d silver day(s) await the gate", len(transformed), len(pending))
+        if not pending:
+            raise AirflowSkipException("Every silver day has passed the gate")  # no event
+        days = [d.isoformat() for d in pending]
+        if not gate(s3, pending):
+            raise AirflowFailException("Quality gate failed; see log. Failed days stay unchecked.")
         get_current_context()["outlet_events"][SILVER_WORKS].extra = {"days": days}
 
     quality_gate(transform())

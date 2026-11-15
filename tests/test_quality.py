@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 import polars as pl
 
@@ -73,23 +73,56 @@ def test_publication_date_flags_wrong_day_and_future():
     assert any("after" in p for p in check_publication_date(future, date(2026, 12, 1), TODAY))
 
 
+SUNDAY = date(2026, 11, 8)
+
+
+def weeks_before(day: date, *counts: int) -> dict[date, int]:
+    """{day - 1 week: counts[0], day - 2 weeks: counts[1], ...}"""
+    return {day - timedelta(weeks=i + 1): c for i, c in enumerate(counts)}
+
+
 def test_row_count_skipped_without_baseline():
-    assert check_row_count(10, []) == []
+    assert check_row_count(SUNDAY, 10, {}) == []
 
 
 def test_row_count_accepts_normal_variation_and_flags_outliers():
-    previous = [5000, 5200, 4800, 5100]
+    counts = weeks_before(SUNDAY, 5000, 5200, 4800, 5100)
 
-    assert check_row_count(5300, previous) == []
-    assert check_row_count(2000, previous)  # under half of the median
-    assert check_row_count(11000, previous)  # over double the median
+    assert check_row_count(SUNDAY, 5300, counts) == []
+    assert check_row_count(SUNDAY, 2000, counts)  # under half of the median
+    assert check_row_count(SUNDAY, 11000, counts)  # over double the median
 
 
-def test_row_count_uses_only_recent_window():
-    old_big_days = [100000] * 5
-    recent = [50, 52, 48, 51, 49, 50, 53]
+def test_weekend_is_judged_against_earlier_weekends_not_weekdays():
+    # Real silver around 2026-11-08: the weekdays before it are ~2,900, a trailing 7-day
+    # median put the floor at 1,440 and failed this Sunday's 1,424 works.
+    weekdays = {SUNDAY - timedelta(days=i): 2900 for i in range(1, 7)}
+    sundays = weeks_before(SUNDAY, 1660, 1464, 1728)
 
-    assert check_row_count(55, old_big_days + recent) == []
+    assert check_row_count(SUNDAY, 1424, {**weekdays, **sundays}) == []
+
+
+def test_row_count_uses_only_the_last_weeks():
+    counts = weeks_before(SUNDAY, 50, 52, 48, 51, 100000, 100000, 100000)
+
+    assert check_row_count(SUNDAY, 55, counts) == []
+
+
+def test_first_of_month_is_left_out_of_the_baseline():
+    day = date(2026, 11, 29)  # four weeks after Sunday 2026-11-01
+    counts = {date(2026, 11, 22): 1600, date(2026, 11, 1): 9000}
+
+    assert check_row_count(day, 1500, counts) == []
+    # Judged against 1,600 alone; with the 1st included the median would be 5,300 and pass it.
+    assert check_row_count(day, 4000, counts)
+
+
+def test_first_of_month_may_run_high_but_not_low():
+    day = date(2026, 12, 1)
+    counts = weeks_before(day, 3000, 2900, 3100)
+
+    assert check_row_count(day, 6400, counts) == []  # month-only dates land on the 1st
+    assert check_row_count(day, 1000, counts)
 
 
 def test_null_publication_date_is_flagged():
@@ -125,17 +158,17 @@ def test_null_work_id_in_topics_is_flagged():
 
 
 def test_empty_day_fails_even_without_baseline():
-    assert check_row_count(0, [])
+    assert check_row_count(SUNDAY, 0, {})
 
 
 def test_run_checks_reports_every_check_by_name():
-    results = run_checks(works_df(), topics_df(GOOD_TOPICS), DAY, TODAY, [2, 2, 3])
+    results = run_checks(works_df(), topics_df(GOOD_TOPICS), DAY, TODAY, weeks_before(DAY, 2, 2, 3))
 
     assert set(results) == {
         "work_id not null and unique",
         "topics reference works",
         "topics shape",
         "publication date",
-        "row count vs recent days",
+        "row count vs same weekday",
     }
     assert all(problems == [] for problems in results.values())

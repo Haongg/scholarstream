@@ -38,6 +38,7 @@ class FakeS3:
     def __init__(self, objects: dict):
         self.objects = objects
         self.written = []
+        self.ops = []  # ("put" | "delete", key) in call order
 
     def get_paginator(self, _name):
         return self
@@ -60,6 +61,11 @@ class FakeS3:
 
     def put_object(self, Bucket, Key, Body):
         self.written.append(Key)
+        self.ops.append(("put", Key))
+
+    def delete_object(self, Bucket, Key):
+        self.objects.pop((Bucket, Key), None)
+        self.ops.append(("delete", Key))
 
 
 def run(monkeypatch, objects, argv=()):
@@ -100,6 +106,15 @@ def test_stale_picks_days_without_silver_or_reloaded_since(monkeypatch):
     _, seen = run(monkeypatch, objects, ["--stale"])
 
     assert seen == [["W1"], ["W3"]]
+
+
+def test_rewriting_a_day_first_removes_its_quality_marker(monkeypatch):
+    marker = "works/publication_date=2026-10-01/_QUALITY_OK"
+    s3, _ = run(monkeypatch, {**bronze(D1, "W1"), ("silver", marker): (b"", T1)})
+
+    assert ("silver", marker) not in s3.objects
+    assert s3.ops[0] == ("delete", marker)  # before any silver file is written
+    assert [op for op, _ in s3.ops[1:]] == ["put", "put"]
 
 
 def test_stale_ignores_partial_days(monkeypatch):

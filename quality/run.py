@@ -2,6 +2,11 @@
 
     python -m quality.run                                  # every day found in silver
     python -m quality.run --from 2026-10-01 --to 2026-10-03
+    python -m quality.run --unchecked                      # only days without a pass marker
+
+Each day that passes gets a _QUALITY_OK marker in silver (transform removes it when it rewrites
+the day). A day that fails stays unmarked, so the DAG keeps re-checking it on every run
+until it passes, instead of dropping it once it is no longer freshly transformed.
 
 Exit code 0 means every check passed; 1 means at least one failed (the DAG should stop).
 """
@@ -16,9 +21,9 @@ import polars as pl
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 
-from ingestion.bronze_writer import s3_client
+from ingestion.bronze_writer import last_modified, s3_client
 from quality.checks import run_checks
-from transform.run import PARTITION, SILVER_BUCKET
+from transform.run import PARTITION, SILVER_BUCKET, quality_marker_key
 
 log = logging.getLogger("quality")
 
@@ -37,6 +42,19 @@ def silver_days(s3) -> list[date]:
     return sorted(days)
 
 
+def is_checked(s3, day: date) -> bool:
+    return last_modified(s3, SILVER_BUCKET, quality_marker_key(day)) is not None
+
+
+def unchecked_days(s3) -> list[date]:
+    """Silver days that have not passed the gate since they were last written."""
+    return [d for d in silver_days(s3) if not is_checked(s3, d)]
+
+
+def mark_checked(s3, day: date) -> None:
+    s3.put_object(Bucket=SILVER_BUCKET, Key=quality_marker_key(day), Body=b"")
+
+
 def read_table(s3, table: str, day: date) -> pl.DataFrame:
     key = f"{table}/{PARTITION}{day.isoformat()}/{table}.parquet"
     return pl.read_parquet(io.BytesIO(s3.get_object(Bucket=SILVER_BUCKET, Key=key)["Body"].read()))
@@ -53,14 +71,14 @@ def try_read(s3, table: str, day: date) -> tuple[pl.DataFrame | None, str | None
 
 
 def gate(s3, days: list[date]) -> bool:
-    """Check the given silver days; True if every check passed. Used by the CLI and the DAG."""
+    """Check the given silver days and mark each one that passes; True if all passed.
+    Used by the CLI and the DAG."""
     today = datetime.now(UTC).date()
-    all_days = silver_days(s3)
 
-    # Row counts of every earlier day, so a day is judged against the days before it.
+    # Row counts of every day, for the row-count baseline (earlier weeks of the same weekday).
     # A day whose works table cannot be read is left out of the baseline.
     counts = {}
-    for d in all_days:
+    for d in silver_days(s3):
         works, _ = try_read(s3, "works", d)
         if works is not None:
             counts[d] = works.height
@@ -78,16 +96,18 @@ def gate(s3, days: list[date]) -> bool:
                     log.error("     - %s", reason)
             continue
         log.info("   %d works, %d work_topics", works.height, topics.height)
-        previous = [counts[d] for d in all_days if d < day and d in counts]
-        results = run_checks(works, topics, day, today, previous)
+        results = run_checks(works, topics, day, today, counts)
         for name, problems in results.items():
             if problems:
-                failed = True
                 log.error("FAIL %s", name)
                 for problem in problems:
                     log.error("     - %s", problem)
             else:
                 log.info("ok   %s", name)
+        if any(results.values()):
+            failed = True
+        else:
+            mark_checked(s3, day)
     if failed:
         log.error("Quality gate FAILED: do not promote to gold")
         return False
@@ -101,10 +121,12 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--from", dest="start", type=date.fromisoformat)
     parser.add_argument("--to", dest="end", type=date.fromisoformat)
+    parser.add_argument("--unchecked", action="store_true", help="only days without a pass marker")
     args = parser.parse_args(argv)
 
     s3 = s3_client()
-    days = [d for d in silver_days(s3) if (not args.start or d >= args.start) and (not args.end or d <= args.end)]
+    candidates = unchecked_days(s3) if args.unchecked else silver_days(s3)
+    days = [d for d in candidates if (not args.start or d >= args.start) and (not args.end or d <= args.end)]
     if not days:
         log.info("No silver partitions in range")
         return 0
