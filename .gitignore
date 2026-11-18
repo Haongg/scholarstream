@@ -6,3 +6,9 @@ data/
 *.duckdb
 .terraform/
 *.tfstate*
+.claude/
+*.license
+.DS_Store
+.pytest_cache/
+.ruff_cache/
+.venv-airflow/

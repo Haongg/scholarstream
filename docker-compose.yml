@@ -1,2 +1,155 @@
-# Local stack (Airflow, MinIO, Postgres, MLflow, Superset) — to be filled in.
-services: {}
+# Shared by every Airflow service. Pipeline code is mounted, not baked in, so edits apply
+# without a rebuild; only requirements.txt changes need `docker compose build`.
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/airflow/Dockerfile
+  image: scholarstream-airflow:3.3.2
+  env_file: .env  # MinIO / Postgres / OpenAlex credentials for the tasks
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/dags
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    # Metadata DB: its own database in the same Postgres. Credentials must be URL-safe.
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?set AIRFLOW_JWT_SECRET in .env}
+    # Local dev only: every visitor of the UI is admin, no login.
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+    # Project root for `import ingestion`, dags/ for the shared asset module.
+    PYTHONPATH: /opt/airflow/project:/opt/airflow/project/dags
+    # Inside the compose network the services are reached by name, not localhost.
+    S3_ENDPOINT_URL: http://minio:9000
+    POSTGRES_HOST: postgres
+  volumes:
+    - .:/opt/airflow/project:ro
+    - airflow_logs:/opt/airflow/logs
+  depends_on: &airflow-depends
+    postgres:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+    airflow-init:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:18
+    container_name: scholarstream-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-scholarstream}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB:-scholarstream}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  minio:
+    image: quay.io/minio/aistor/minio:latest
+    container_name: scholarstream-minio
+    command: server /data --console-address ":9001" --license /minio.license
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Console
+    volumes:
+      - minio_data:/data
+      - ./minio.license:/minio.license:ro
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  minio-init:
+    image: quay.io/minio/aistor/minio:latest
+    container_name: scholarstream-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" &&
+        mc mb --ignore-existing local/bronze local/silver
+    restart: "no"
+
+  # Postgres only creates POSTGRES_DB on a fresh volume, so create Airflow's database here
+  # (idempotent) instead of in an initdb script that an existing volume would never run.
+  airflow-db-init:
+    image: postgres:18
+    container_name: scholarstream-airflow-db-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-scholarstream}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - psql -tAc "SELECT 1 FROM pg_database WHERE datname = 'airflow'" | grep -q 1 || createdb airflow
+    restart: "no"
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: scholarstream-airflow-init
+    command: ["db", "migrate"]
+    depends_on:
+      airflow-db-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: scholarstream-airflow-apiserver
+    command: ["api-server"]
+    ports:
+      - "8080:8080"   # UI + REST API
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: scholarstream-airflow-scheduler
+    command: ["scheduler"]
+    environment:
+      <<: *airflow-env
+      AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: scholarstream-airflow-dag-processor
+    command: ["dag-processor"]
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  minio_data:
+  airflow_logs:
