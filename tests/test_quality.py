@@ -5,6 +5,7 @@ import polars as pl
 from quality.checks import (
     check_publication_date,
     check_row_count,
+    check_topic_dimension,
     check_topics_reference_works,
     check_topics_shape,
     check_work_id,
@@ -27,6 +28,44 @@ def topics_df(rows):
 
 
 GOOD_TOPICS = [("W1", "T1", 1), ("W1", "T2", 2), ("W2", "T1", 1)]
+
+
+def topic_dim_df(*rows):
+    """topics table rows as (topic_id, subfield_id); the other names are filled in."""
+    return pl.DataFrame(
+        [
+            {
+                "topic_id": t, "topic_name": f"Topic {t}", "subfield_id": s, "subfield_name": "Sub",
+                "field_id": "17", "field_name": "Computer Science", "domain_id": "3", "domain_name": "Physical Sciences",
+            }
+            for t, s in rows
+        ]
+    )
+
+
+GOOD_TOPIC_DIM = topic_dim_df(("T1", "1707"), ("T2", "1702"))
+
+
+def test_topic_dimension_passes_on_good_data():
+    assert check_topic_dimension(topics_df(GOOD_TOPICS), GOOD_TOPIC_DIM) == []
+
+
+def test_topic_dimension_flags_topic_with_two_hierarchies():
+    problems = check_topic_dimension(topics_df(GOOD_TOPICS), topic_dim_df(("T1", "1707"), ("T1", "1702"), ("T2", "1702")))
+
+    assert any("more than one hierarchy: T1" in p for p in problems)
+
+
+def test_topic_dimension_flags_incomplete_hierarchy():
+    dim = GOOD_TOPIC_DIM.with_columns(pl.when(pl.col("topic_id") == "T2").then(None).otherwise(pl.col("field_id")).alias("field_id"))
+
+    assert any("miss a name" in p for p in check_topic_dimension(topics_df(GOOD_TOPICS), dim))
+
+
+def test_topic_dimension_flags_topic_used_but_not_described():
+    problems = check_topic_dimension(topics_df(GOOD_TOPICS), topic_dim_df(("T1", "1707")))
+
+    assert any("1 topic_ids in work_topics are missing" in p for p in problems)
 
 
 def test_work_id_passes_when_unique():
@@ -162,12 +201,13 @@ def test_empty_day_fails_even_without_baseline():
 
 
 def test_run_checks_reports_every_check_by_name():
-    results = run_checks(works_df(), topics_df(GOOD_TOPICS), DAY, TODAY, weeks_before(DAY, 2, 2, 3))
+    results = run_checks(works_df(), topics_df(GOOD_TOPICS), DAY, TODAY, weeks_before(DAY, 2, 2, 3), GOOD_TOPIC_DIM)
 
     assert set(results) == {
         "work_id not null and unique",
         "topics reference works",
         "topics shape",
+        "topic dimension",
         "publication date",
         "row count vs same weekday",
     }

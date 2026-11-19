@@ -53,6 +53,35 @@ def check_topics_shape(works: pl.DataFrame, topics: pl.DataFrame) -> list[str]:
     return problems
 
 
+TOPIC_NAME_COLUMNS = ("topic_name", "subfield_id", "subfield_name", "field_id", "field_name", "domain_id", "domain_name")
+
+
+def check_topic_dimension(work_topics: pl.DataFrame, topics: pl.DataFrame) -> list[str]:
+    """The day's `topics` table: one row per topic (so one parent each), complete hierarchy,
+    and every topic used in work_topics is described."""
+    problems = []
+    nulls = topics["topic_id"].null_count()
+    if nulls:
+        problems.append(f"{nulls} topics rows have a null topic_id")
+    conflicting = topics.filter(pl.col("topic_id").is_not_null() & pl.col("topic_id").is_duplicated())
+    if not conflicting.is_empty():
+        ids = conflicting["topic_id"].unique().sort().to_list()
+        problems.append(f"{len(ids)} topics appear with more than one hierarchy: {', '.join(ids[:5])}")
+    incomplete = topics.filter(pl.any_horizontal(pl.col(c).is_null() for c in TOPIC_NAME_COLUMNS)).height
+    if incomplete:
+        problems.append(f"{incomplete} topics rows miss a name or a subfield/field/domain")
+    undescribed = (
+        work_topics.filter(pl.col("topic_id").is_not_null())
+        .select("topic_id")
+        .unique()
+        .join(topics.select("topic_id"), on="topic_id", how="anti")
+        .height
+    )
+    if undescribed:
+        problems.append(f"{undescribed} topic_ids in work_topics are missing from topics")
+    return problems
+
+
 def check_publication_date(works: pl.DataFrame, day: date, today: date) -> list[str]:
     problems = []
     null_dates = works["publication_date"].null_count()
@@ -108,12 +137,16 @@ def run_checks(
     day: date,
     today: date,
     counts: dict[date, int],
+    topic_dim: pl.DataFrame,
 ) -> dict[str, list[str]]:
-    """Run every check for one day and return {check name: problems}. `counts`: works per day."""
+    """Run every check for one day and return {check name: problems}.
+
+    `topics` is work_topics, `topic_dim` the topics table; `counts`: works per day."""
     return {
         "work_id not null and unique": check_work_id(works),
         "topics reference works": check_topics_reference_works(works, topics),
         "topics shape": check_topics_shape(works, topics),
+        "topic dimension": check_topic_dimension(topics, topic_dim),
         "publication date": check_publication_date(works, day, today),
         "row count vs same weekday": check_row_count(day, len(works), counts),
     }

@@ -59,7 +59,7 @@ def read_day(s3, day: date) -> list[dict]:
         for obj in listing.get("Contents", []):
             if not obj["Key"].endswith(".json.gz"):
                 continue  # the _SUCCESS marker
-            body =s3.get_object(Bucket=BRONZE_BUCKET, Key=obj["Key"])["Body"].read()
+            body = s3.get_object(Bucket=BRONZE_BUCKET, Key=obj["Key"])["Body"].read()
             works.extend(json.loads(gzip.decompress(body))["results"])
     return works
 
@@ -71,14 +71,15 @@ def write_table(s3, table: str, day: date, df: pl.DataFrame) -> None:
     s3.put_object(Bucket=SILVER_BUCKET, Key=key, Body=buffer.getvalue())
 
 
-def transform_day(s3, day: date) -> tuple[int, int]:
-    works, work_topics = to_tables(read_day(s3, day))
+def transform_day(s3, day: date) -> tuple[int, int, int]:
+    works, work_topics, topics = to_tables(read_day(s3, day))
     # The day's silver is about to change, so its earlier quality pass no longer holds. Removed
     # first: if the writes below fail halfway, the day is left unchecked, never falsely passed.
     s3.delete_object(Bucket=SILVER_BUCKET, Key=quality_marker_key(day))
     write_table(s3, "works", day, works)
-    write_table(s3, "work_topics", day, work_topics)
-    return len(works), len(work_topics)
+    write_table(s3, "topics", day, topics)
+    write_table(s3, "work_topics", day, work_topics)  # last: stale_days reads its timestamp
+    return len(works), len(work_topics), len(topics)
 
 
 def complete_days(s3, start: date | None = None, end: date | None = None) -> dict[date, datetime]:
@@ -113,8 +114,8 @@ def stale_days(s3) -> list[date]:
 
 def transform_days(s3, days: list[date]) -> None:
     for day in days:
-        works, topics = transform_day(s3, day)
-        log.info("Silver %s: %d works, %d work_topics", day, works, topics)
+        works, work_topics, topics = transform_day(s3, day)
+        log.info("Silver %s: %d works, %d work_topics, %d topics", day, works, work_topics, topics)
 
 
 def main(argv=None) -> int:

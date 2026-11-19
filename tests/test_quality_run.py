@@ -35,6 +35,11 @@ def topics_bytes(n: int = 2) -> bytes:
     )
 
 
+def topic_dim_bytes() -> bytes:
+    names = ("topic_name", "subfield_id", "subfield_name", "field_id", "field_name", "domain_id", "domain_name")
+    return parquet_bytes(pl.DataFrame({"topic_id": ["T1"], **{c: ["x"] for c in names}}))
+
+
 class FakeS3:
     """Holds silver objects as {key: bytes}; mimics the calls quality.run makes."""
 
@@ -67,7 +72,11 @@ def key(table: str, day: date) -> str:
 
 
 def good_day(day: date) -> dict[str, bytes]:
-    return {key("works", day): works_bytes(day), key("work_topics", day): topics_bytes()}
+    return {
+        key("works", day): works_bytes(day),
+        key("work_topics", day): topics_bytes(),
+        key("topics", day): topic_dim_bytes(),
+    }
 
 
 def marker(day: date) -> str:
@@ -139,6 +148,19 @@ def test_missing_work_topics_fails_without_crashing(use_s3, caplog):
         assert quality_run.main([]) == 1
 
     assert "work_topics: NoSuchKey" in caplog.text
+
+
+def test_missing_topics_table_fails_without_crashing(use_s3, caplog):
+    # e.g. a day built before the topics table existed and never rebuilt
+    objects = {**good_day(D1), **good_day(D2)}
+    del objects[key("topics", D2)]
+    use_s3(objects)
+
+    with caplog.at_level(logging.INFO):
+        assert quality_run.main([]) == 1
+
+    assert "- topics: NoSuchKey" in caplog.text
+    assert marker(D1) in objects and marker(D2) not in objects
 
 
 def test_missing_works_fails_and_other_days_are_still_checked(use_s3, caplog):

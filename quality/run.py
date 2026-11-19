@@ -28,7 +28,7 @@ from transform.run import PARTITION, SILVER_BUCKET, quality_marker_key
 log = logging.getLogger("quality")
 
 
-SILVER_TABLES = ("works", "work_topics")
+SILVER_TABLES = ("works", "work_topics", "topics")
 
 
 def silver_days(s3) -> list[date]:
@@ -88,15 +88,16 @@ def gate(s3, days: list[date]) -> bool:
         log.info("== %s", day)
         works, works_error = try_read(s3, "works", day)
         topics, topics_error = try_read(s3, "work_topics", day)
-        if works is None or topics is None:
+        topic_dim, topic_dim_error = try_read(s3, "topics", day)
+        if works is None or topics is None or topic_dim is None:
             failed = True
             log.error("FAIL silver tables readable")
-            for reason in (works_error, topics_error):
+            for reason in (works_error, topics_error, topic_dim_error):
                 if reason:
                     log.error("     - %s", reason)
             continue
-        log.info("   %d works, %d work_topics", works.height, topics.height)
-        results = run_checks(works, topics, day, today, counts)
+        log.info("   %d works, %d work_topics, %d topics", works.height, topics.height, topic_dim.height)
+        results = run_checks(works, topics, day, today, counts, topic_dim)
         for name, problems in results.items():
             if problems:
                 log.error("FAIL %s", name)
