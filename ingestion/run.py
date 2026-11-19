@@ -44,6 +44,11 @@ MAX_DAY_ATTEMPTS = 2  # a count mismatch is retried once, in case OpenAlex chang
 DEFAULT_LOOKBACK_DAYS = 7  # ~60 credits/day for CS, so a week costs ~400 of the 10,000 budget
 
 
+def lookback_days() -> int:
+    """How many recent days every run re-fetches (INGEST_LOOKBACK_DAYS), since OpenAlex indexes late."""
+    return int(os.getenv("INGEST_LOOKBACK_DAYS") or DEFAULT_LOOKBACK_DAYS)
+
+
 def resolve_start(last_loaded: date, end: date, lookback_days: int) -> date:
     """First day to load: the day after the watermark, or earlier to cover the lookback window."""
     after_watermark = last_loaded + timedelta(days=1)
@@ -121,8 +126,7 @@ def ingest(start: date | None = None, end: date | None = None) -> IngestResult:
             last = watermark.get()
             if last is None:
                 raise NoWatermark("No watermark yet: pass --from YYYY-MM-DD for the first load")
-            lookback = int(os.getenv("INGEST_LOOKBACK_DAYS") or DEFAULT_LOOKBACK_DAYS)
-            start = resolve_start(last, end, lookback)
+            start = resolve_start(last, end, lookback_days())
         if start > end:
             log.info("Nothing to load (start %s is after end %s)", start, end)
             return result

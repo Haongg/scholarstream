@@ -9,7 +9,9 @@ from quality.checks import (
     check_topics_reference_works,
     check_topics_shape,
     check_work_id,
+    row_count_warnings,
     run_checks,
+    run_warnings,
 )
 
 DAY = date(2026, 10, 1)
@@ -128,8 +130,20 @@ def test_row_count_accepts_normal_variation_and_flags_outliers():
     counts = weeks_before(SUNDAY, 5000, 5200, 4800, 5100)
 
     assert check_row_count(SUNDAY, 5300, counts) == []
-    assert check_row_count(SUNDAY, 2000, counts)  # under half of the median
-    assert check_row_count(SUNDAY, 11000, counts)  # over double the median
+    assert row_count_warnings(SUNDAY, 5300, counts) == []
+    assert "below" in check_row_count(SUNDAY, 2000, counts)[0]  # under half of the median
+
+
+def test_row_count_far_above_only_warns():
+    # e.g. 2026-11-15: a bulk upload to Zenodo, real data in the source, not a broken load
+    counts = weeks_before(SUNDAY, 1464, 1660, 1453)
+
+    assert check_row_count(SUNDAY, 3776, counts) == []
+    assert "above" in row_count_warnings(SUNDAY, 3776, counts)[0]
+
+
+def test_row_count_warnings_skipped_without_baseline():
+    assert row_count_warnings(SUNDAY, 100000, {}) == []
 
 
 def test_weekend_is_judged_against_earlier_weekends_not_weekdays():
@@ -152,16 +166,25 @@ def test_first_of_month_is_left_out_of_the_baseline():
     counts = {date(2026, 11, 22): 1600, date(2026, 11, 1): 9000}
 
     assert check_row_count(day, 1500, counts) == []
-    # Judged against 1,600 alone; with the 1st included the median would be 5,300 and pass it.
-    assert check_row_count(day, 4000, counts)
+    assert row_count_warnings(day, 1500, counts) == []
+    # Judged against 1,600 alone; with the 1st included the median would be 5,300 and not warn.
+    assert row_count_warnings(day, 4000, counts)
 
 
 def test_first_of_month_may_run_high_but_not_low():
     day = date(2026, 12, 1)
     counts = weeks_before(day, 3000, 2900, 3100)
 
-    assert check_row_count(day, 6400, counts) == []  # month-only dates land on the 1st
+    assert row_count_warnings(day, 6400, counts) == []  # month-only dates land on the 1st
     assert check_row_count(day, 1000, counts)
+
+
+def test_run_warnings_reports_by_name():
+    counts = weeks_before(SUNDAY, 1464, 1660, 1453)
+    works = pl.DataFrame({"work_id": [f"W{i}" for i in range(3776)]})
+
+    assert list(run_warnings(works, SUNDAY, counts)) == ["row count far above same weekday"]
+    assert run_warnings(works, SUNDAY, counts)["row count far above same weekday"]
 
 
 def test_null_publication_date_is_flagged():

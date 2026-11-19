@@ -2,7 +2,7 @@
 
 import io
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import polars as pl
 import pytest
@@ -71,12 +71,20 @@ def key(table: str, day: date) -> str:
     return f"{table}/publication_date={day.isoformat()}/{table}.parquet"
 
 
-def good_day(day: date) -> dict[str, bytes]:
+def good_day(day: date, n: int = 2) -> dict[str, bytes]:
     return {
-        key("works", day): works_bytes(day),
-        key("work_topics", day): topics_bytes(),
+        key("works", day): works_bytes(day, n),
+        key("work_topics", day): topics_bytes(n),
         key("topics", day): topic_dim_bytes(),
     }
+
+
+def weekly_history(day: date, n: int, weeks: int = 4) -> dict[str, bytes]:
+    """Good silver of `n` works on the same weekday in each of the previous `weeks` weeks."""
+    history = {}
+    for w in range(1, weeks + 1):
+        history.update(good_day(day - timedelta(weeks=w), n))
+    return history
 
 
 def marker(day: date) -> str:
@@ -86,8 +94,13 @@ def marker(day: date) -> str:
 D1, D2, D3 = date(2026, 10, 1), date(2026, 10, 2), date(2026, 10, 3)
 
 
+TODAY = datetime.now(UTC).date()  # the gate judges a day's age against the real clock
+
+
 @pytest.fixture
 def use_s3(monkeypatch):
+    monkeypatch.setenv("INGEST_LOOKBACK_DAYS", "7")
+
     def install(objects):
         monkeypatch.setattr(quality_run, "s3_client", lambda: FakeS3(objects))
         monkeypatch.setattr(quality_run, "load_dotenv", lambda: None)
@@ -161,6 +174,60 @@ def test_missing_topics_table_fails_without_crashing(use_s3, caplog):
 
     assert "- topics: NoSuchKey" in caplog.text
     assert marker(D1) in objects and marker(D2) not in objects
+
+
+def test_lookback_window_ends_on_the_last_day_ingestion_refetches():
+    assert quality_run.is_settling(TODAY - timedelta(days=7), TODAY, lookback=7)  # loaded one last time
+    assert not quality_run.is_settling(TODAY - timedelta(days=8), TODAY, lookback=7)
+    assert not quality_run.is_settling(TODAY - timedelta(days=1), TODAY, lookback=0)
+
+
+def test_young_short_day_is_deferred_not_failed(use_s3, caplog):
+    # e.g. 2026-11-18 loaded on 11-19: OpenAlex had indexed 170 of its ~2,800 works
+    young = TODAY - timedelta(days=1)
+    objects = use_s3({**weekly_history(young, 20), **good_day(young, 2)})
+
+    with caplog.at_level(logging.INFO):
+        assert quality_run.main([]) == 0
+
+    assert marker(young) not in objects  # not in gold yet; re-checked next run
+    assert marker(young - timedelta(weeks=1)) in objects
+    assert "DEFER row count vs same weekday" in caplog.text
+    assert "FAILED" not in caplog.text
+
+
+def test_short_day_outside_the_lookback_window_fails(use_s3, caplog):
+    # no longer re-fetched, so a missing share of works will not arrive any more
+    old = TODAY - timedelta(days=8)
+    objects = use_s3({**weekly_history(old, 20), **good_day(old, 2)})
+
+    with caplog.at_level(logging.INFO):
+        assert quality_run.main([]) == 1
+
+    assert marker(old) not in objects
+    assert "FAIL  row count vs same weekday" in caplog.text
+
+
+def test_young_day_with_another_failure_is_not_deferred(use_s3):
+    young = TODAY - timedelta(days=1)
+    day = good_day(young, 2)
+    day[key("works", young)] = works_bytes(young - timedelta(days=1), 2)  # partition mismatch
+    objects = use_s3({**weekly_history(young, 20), **day})
+
+    assert quality_run.main([]) == 1
+    assert marker(young) not in objects
+
+
+def test_day_far_above_usual_only_warns_and_passes(use_s3, caplog):
+    # e.g. 2026-11-15: a bulk upload made the day 2.5x its usual size; gold filters it
+    old = TODAY - timedelta(days=10)
+    objects = use_s3({**weekly_history(old, 4), **good_day(old, 20)})
+
+    with caplog.at_level(logging.INFO):
+        assert quality_run.main([]) == 0
+
+    assert marker(old) in objects
+    assert "WARN  row count far above same weekday" in caplog.text
 
 
 def test_missing_works_fails_and_other_days_are_still_checked(use_s3, caplog):
