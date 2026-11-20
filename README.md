@@ -1,10 +1,10 @@
 # ScholarStream: Incremental Topic Classification Pipeline for Scholarly Data
 
-An end-to-end data platform that ingests research papers from [OpenAlex](https://openalex.org), processes them through a medallion lakehouse, and feeds a multi-label classifier that learns new research topics incrementally — without retraining from scratch.
+An end-to-end data platform that ingests research papers from [OpenAlex](https://openalex.org), processes them through a bronze/silver/gold (medallion) data lake, and feeds a multi-label classifier that learns new research topics incrementally — without retraining from scratch.
 
 > **Focus:** This is primarily a **data engineering** project. The ML component exists to demonstrate how a data platform serves a continuously-learning model in production-like conditions.
 
-> **Status:** Early stage. The architecture and repository layout are defined; implementation is in progress, starting with ingestion and the bronze/silver layers.
+> **Status:** Early stage. Working locally: incremental ingestion into bronze, bronze → silver, the quality gate, Airflow DAGs chaining them, and the dbt gold star schema with its tests (gold is not yet scheduled by Airflow). ML, API, dashboard and AWS infrastructure are planned.
 
 ---
 
@@ -23,7 +23,7 @@ flowchart TD
     A[OpenAlex API] --> B[Incremental ingestion<br/>Python + watermark]
     B --> C[Bronze: raw JSON<br/>S3 / MinIO]
     C --> D[Silver: cleaned, abstracts rebuilt<br/>Polars → Parquet]
-    D --> E{Data quality checks<br/>dbt tests / Great Expectations}
+    D --> E{Data quality gate<br/>Polars checks}
     E -->|pass| F[Gold: star schema<br/>dbt]
     E -->|fail| X[Alert + stop DAG]
     F --> G[Dashboard<br/>Superset / Metabase]
@@ -44,7 +44,7 @@ All stages are orchestrated by **Apache Airflow**.
 | Storage | MinIO | S3 + Glue Data Catalog |
 | Processing | Polars | Polars on EC2 |
 | Transformation | dbt + DuckDB | dbt + Athena |
-| Data quality | dbt tests, Great Expectations | same |
+| Data quality | Polars quality gate (silver), dbt tests (gold) | same |
 | ML tracking | MLflow | MLflow (artifacts on S3) |
 | Training | Kaggle (one-time backfill) | SageMaker Training Job (CPU) |
 | Serving | FastAPI (Docker) | ECR + App Runner |
@@ -60,24 +60,27 @@ All stages are orchestrated by **Apache Airflow**.
 - Supports **backfill** for arbitrary historical date ranges
 
 ### 2. Bronze → Silver
-- Raw JSON lands in the bronze layer unchanged, partitioned by ingestion date
+- Raw JSON lands in the bronze layer unchanged, partitioned by publication date, so re-running a day replaces its partition
 - Silver layer:
   - Reconstructs abstracts from OpenAlex's `abstract_inverted_index` format
   - Deduplicates records, keeping the latest version per `work_id`
   - Flattens nested topic arrays into a many-to-many table
 
 ### 3. Data quality gate
-Checks run before data is promoted to gold. If any check fails, the DAG stops and sends an alert. Checks include:
+Plain Polars checks run on each silver day before it is promoted to gold. A day that passes gets a `_QUALITY_OK` marker; if any check fails, the DAG stops. Checks include:
 - `work_id` uniqueness and not-null constraints
-- Referential integrity between works and topics
-- Publication dates within valid ranges
-- Row-count anomaly detection between runs
+- Referential integrity between works and topics, and a complete topic hierarchy
+- Publication date equal to the partition day and not in the future
+- Row count against the median of the same weekday over the previous 4 weeks
 
 ### 4. Gold layer (dbt)
-A star schema for analytics and ML:
-- `fact_work_topics`
-- `dim_works`, `dim_topics`, `dim_authors`, `dim_institutions`
-- Analytical marts: topic trends by year, fastest-growing topics
+dbt + DuckDB builds a star schema as Parquet in the `gold` bucket, reading **only silver days marked `_QUALITY_OK`**. Tables are rebuilt in full on every run, so a re-run is idempotent:
+- `fact_work_topics`: one row per (work, topic), with rank and a primary-topic flag
+- `dim_works` (one row per work, with `has_abstract`), `dim_topics` (subfield → field → domain), `dim_date`
+
+dbt tests check keys, relationships from the fact to every dimension, the fact grain, exactly one primary topic per work, and that no unchecked day reaches gold.
+
+Planned: `dim_authors`, `dim_institutions`, and marts such as topic trends by year.
 
 ### 5. ML pipeline
 - **Task split:** the top-N topics are divided into sequential tasks (e.g. 10 tasks × 10 topics), simulating new topics arriving over time
@@ -96,8 +99,8 @@ A star schema for analytics and ML:
 ├── dags/                  # Airflow DAGs
 ├── ingestion/             # OpenAlex API client, watermark logic
 ├── transform/             # Polars bronze → silver jobs
-├── dbt_project/           # dbt models, tests, docs
-├── quality/               # Great Expectations suites
+├── dbt/                   # dbt project: staging + gold models, tests
+├── quality/               # Quality gate between silver and gold (Polars)
 ├── ml/
 │   ├── embeddings/        # Embedding computation
 │   └── training/          # Incremental training, replay buffer
@@ -131,15 +134,25 @@ docker compose up -d
 Then open:
 - Airflow UI: http://localhost:8080
 - MinIO console: http://localhost:9001
-- Dashboard: http://localhost:8088
+Trigger the `ingest_openalex` DAG to start the pipeline; `bronze_to_silver` (with the quality gate) runs after it.
 
-Trigger the `openalex_ingestion` DAG to start the pipeline.
+### Build and test gold
+
+dbt runs in its own environment and does not read `.env`, so export it first:
+
+```bash
+python3 -m venv .venv-dbt && .venv-dbt/bin/pip install -r requirements-dbt.txt
+set -a && . ./.env && set +a
+cd dbt
+../.venv-dbt/bin/dbt build --profiles-dir .   # build gold and run its tests
+../.venv-dbt/bin/dbt test --profiles-dir .    # tests only, on the existing gold
+```
 
 ### Run tests
 
 ```bash
-pytest tests/
-cd dbt_project && dbt test
+.venv/bin/python -m pytest
+.venv/bin/ruff check .
 ```
 
 ## Evaluation
