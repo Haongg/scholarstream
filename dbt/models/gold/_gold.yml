@@ -1,0 +1,55 @@
+version: 2
+
+models:
+  - name: fact_work_topics
+    description: One row per (work, topic) of the quality-checked silver days.
+    columns:
+      - name: work_id
+        data_tests:
+          - not_null
+          - relationships: {arguments: {to: ref('dim_works'), field: work_id}}
+      - name: topic_id
+        data_tests:
+          - not_null
+          - relationships: {arguments: {to: ref('dim_topics'), field: topic_id}}
+      - name: publication_date
+        data_tests:
+          - not_null
+          - relationships: {arguments: {to: ref('dim_date'), field: date_day}}
+      - name: rank
+        data_tests:
+          - not_null
+          - accepted_values: {arguments: {values: [1, 2, 3], quote: false}}
+      - name: is_primary
+        data_tests: [not_null]
+
+  - name: dim_works
+    description: One row per work (latest version across days); all work types.
+    columns:
+      - name: work_id
+        data_tests: [unique, not_null]
+      - name: publication_date
+        data_tests: [not_null]
+      - name: has_abstract
+        description: About a quarter of works have no abstract; that is expected, not an error.
+        data_tests: [not_null]
+
+  - name: dim_topics
+    description: One row per topic with its hierarchy (subfield, field, domain).
+    columns:
+      - name: topic_id
+        data_tests: [unique, not_null]
+      - name: topic_name
+        data_tests: [not_null]
+      - name: subfield_id
+        data_tests: [not_null]
+      - name: field_id
+        data_tests: [not_null]
+      - name: domain_id
+        data_tests: [not_null]
+
+  - name: dim_date
+    description: Calendar from the first to the last publication date in gold.
+    columns:
+      - name: date_day
+        data_tests: [unique, not_null]
