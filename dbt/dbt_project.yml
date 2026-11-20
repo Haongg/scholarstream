@@ -1,0 +1,24 @@
+name: scholarstream
+version: "0.1.0"
+profile: scholarstream
+config-version: 2
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+
+flags:
+  send_anonymous_usage_stats: false
+
+models:
+  scholarstream:
+    # Staging reads silver straight from the lake and is inlined into the gold models, so
+    # nothing but gold is written.
+    staging:
+      +materialized: ephemeral
+    # Gold is plain Parquet in the lake (external_root in profiles.yml), one file per table,
+    # rebuilt in full on every run: idempotent, and small enough (~10^5 rows) not to need
+    # incremental models yet.
+    gold:
+      +materialized: external
+      +format: parquet

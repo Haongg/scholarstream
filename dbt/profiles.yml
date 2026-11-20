@@ -1,0 +1,22 @@
+# Everything comes from the environment (dbt does not read .env; see the README / CLAUDE.md
+# for how to export it). SILVER_ROOT / GOLD_ROOT default to the MinIO buckets; tests point
+# them at local folders.
+scholarstream:
+  target: local
+  outputs:
+    local:
+      type: duckdb
+      # Catalog of the views over gold's Parquet files; the data itself lives in GOLD_ROOT.
+      path: "{{ env_var('DBT_DUCKDB_PATH', 'scholarstream.duckdb') }}"
+      threads: 4
+      extensions: [httpfs, parquet]
+      external_root: "{{ env_var('GOLD_ROOT', 's3://gold') }}"
+      secrets:
+        - type: s3
+          key_id: "{{ env_var('MINIO_ROOT_USER', '') }}"
+          secret: "{{ env_var('MINIO_ROOT_PASSWORD', '') }}"
+          # Same variable as the Python code (boto3 wants the scheme, DuckDB does not).
+          endpoint: "{{ env_var('S3_ENDPOINT_URL', 'http://localhost:9000') | replace('http://', '') }}"
+          url_style: path
+          use_ssl: false
+          region: us-east-1
