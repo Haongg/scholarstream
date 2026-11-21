@@ -4,7 +4,7 @@ An end-to-end data platform that ingests research papers from [OpenAlex](https:/
 
 > **Focus:** This is primarily a **data engineering** project. The ML component exists to demonstrate how a data platform serves a continuously-learning model in production-like conditions.
 
-> **Status:** Early stage. Working locally: incremental ingestion into bronze, bronze → silver, the quality gate, Airflow DAGs chaining them, and the dbt gold star schema with its tests (gold is not yet scheduled by Airflow). ML, API, dashboard and AWS infrastructure are planned.
+> **Status:** Early stage. Working locally: incremental ingestion into bronze, bronze → silver, the quality gate, Airflow DAGs chaining them, and the dbt gold star schema with its tests, built by Airflow after the quality gate. ML, API, dashboard and AWS infrastructure are planned.
 
 ---
 
@@ -134,7 +134,7 @@ docker compose up -d
 Then open:
 - Airflow UI: http://localhost:8080
 - MinIO console: http://localhost:9001
-Trigger the `ingest_openalex` DAG to start the pipeline; `bronze_to_silver` (with the quality gate) runs after it.
+Trigger the `ingest_openalex` DAG to start the pipeline; `bronze_to_silver` (with the quality gate) runs after it, then `silver_to_gold` (dbt build + tests) once new silver days pass the gate.
 
 ### Build and test gold
 
