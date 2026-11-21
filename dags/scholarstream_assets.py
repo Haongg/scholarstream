@@ -9,3 +9,4 @@ from airflow.sdk import Asset
 
 BRONZE_WORKS = Asset(name="bronze_works", uri="s3://bronze/works")
 SILVER_WORKS = Asset(name="silver_works", uri="s3://silver/works")  # quality-checked silver
+GOLD = Asset(name="gold_star_schema", uri="s3://gold/")  # built and passed its dbt tests

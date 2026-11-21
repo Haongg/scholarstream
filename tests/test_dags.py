@@ -1,4 +1,4 @@
-"""DAG wiring: both DAGs parse, and the asset chain ingest -> silver -> (gold) is intact.
+"""DAG wiring: all DAGs parse, and the asset chain ingest -> silver -> gold is intact.
 
 Needs Airflow, which lives in its own environment (.venv-airflow, see requirements-airflow.txt)
 because its constraints pin library versions; skipped when Airflow is not installed.
@@ -35,7 +35,7 @@ def uris(assets):
 
 def test_dags_import_cleanly(dagbag):
     assert dagbag.import_errors == {}
-    assert set(dagbag.dag_ids) == {"ingest_openalex", "bronze_to_silver"}
+    assert set(dagbag.dag_ids) == {"ingest_openalex", "bronze_to_silver", "silver_to_gold"}
 
 
 def test_ingest_runs_daily_after_budget_reset_and_emits_bronze(dagbag):
@@ -58,3 +58,10 @@ def test_silver_asset_is_emitted_only_after_the_quality_gate(dagbag):
     assert gate.upstream_task_ids == {"transform"}
     assert transform.outlets == []  # silver that has not been checked must not trigger gold
     assert uris(gate.outlets) == {"s3://silver/works"}
+
+
+def test_gold_is_triggered_only_by_checked_silver_and_emits_gold(dagbag):
+    dag = dagbag.dags["silver_to_gold"]
+    assert {a.uri for a in dag.timetable.asset_condition.objects} == {"s3://silver/works"}
+    assert dag.max_active_runs == 1  # one writer of the gold files at a time
+    assert uris(dag.get_task("dbt_build").outlets) == {"s3://gold/"}
