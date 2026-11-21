@@ -12,3 +12,8 @@ data/
 .pytest_cache/
 .ruff_cache/
 .venv-airflow/
+.venv-dbt/
+dbt/target/
+dbt/logs/
+*.duckdb
+*.duckdb.wal

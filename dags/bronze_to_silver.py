@@ -11,6 +11,9 @@ starts on silver that passed. A failed gate fails the run without retrying.
 The gate checks every silver day without a _QUALITY_OK marker, not just the days this run
 transformed: transform has already written a failed day's silver, so on the next run it is
 no longer stale, yet it must still not count as passed.
+
+A young day that is only short of works is deferred by the gate (see quality.run): the run
+succeeds, but the day stays unmarked and is left out of the event until it settles.
 """
 
 import logging
@@ -46,17 +49,20 @@ def bronze_to_silver():
     @task(outlets=[SILVER_WORKS])
     def quality_gate(transformed: list[str]) -> None:
         from ingestion.bronze_writer import s3_client
-        from quality.run import gate, unchecked_days
+        from quality.run import gate, is_checked, unchecked_days
 
         s3 = s3_client()
         pending = unchecked_days(s3)
         log.info("Transformed %d day(s); %d silver day(s) await the gate", len(transformed), len(pending))
         if not pending:
             raise AirflowSkipException("Every silver day has passed the gate")  # no event
-        days = [d.isoformat() for d in pending]
         if not gate(s3, pending):
             raise AirflowFailException("Quality gate failed; see log. Failed days stay unchecked.")
-        get_current_context()["outlet_events"][SILVER_WORKS].extra = {"days": days}
+        # Deferred days (young, still settling) pass the gate unmarked; announce only marked ones.
+        passed = [d.isoformat() for d in pending if is_checked(s3, d)]
+        if not passed:
+            raise AirflowSkipException("Only settling days were checked; nothing new for gold")
+        get_current_context()["outlet_events"][SILVER_WORKS].extra = {"days": passed}
 
     quality_gate(transform())
 

@@ -1,0 +1,5 @@
+# dbt lives in its own environment (.venv-dbt locally, /opt/dbt in the Airflow image): it pins
+# many libraries of its own, which would clash with requirements.txt and Airflow's constraints.
+#   python3 -m venv .venv-dbt && .venv-dbt/bin/pip install -r requirements-dbt.txt
+dbt-core==1.12.7
+dbt-duckdb==1.11.1

@@ -76,7 +76,7 @@ def run(monkeypatch, objects, argv=()):
 
     def fake_to_tables(works):
         seen.append([w["id"] for w in works])
-        return pl.DataFrame(), pl.DataFrame()
+        return pl.DataFrame(), pl.DataFrame(), pl.DataFrame()
 
     monkeypatch.setattr(transform_run, "to_tables", fake_to_tables)
     assert transform_run.main(list(argv)) == 0
@@ -114,7 +114,14 @@ def test_rewriting_a_day_first_removes_its_quality_marker(monkeypatch):
 
     assert ("silver", marker) not in s3.objects
     assert s3.ops[0] == ("delete", marker)  # before any silver file is written
-    assert [op for op, _ in s3.ops[1:]] == ["put", "put"]
+    assert [op for op, _ in s3.ops[1:]] == ["put", "put", "put"]
+
+
+def test_work_topics_is_written_last(monkeypatch):
+    # stale_days takes the work_topics timestamp as "silver finished", so it must come last.
+    s3, _ = run(monkeypatch, bronze(D1, "W1"))
+
+    assert [k.split("/")[0] for k in s3.written] == ["works", "topics", "work_topics"]
 
 
 def test_stale_ignores_partial_days(monkeypatch):

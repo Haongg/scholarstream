@@ -8,7 +8,14 @@ Each day that passes gets a _QUALITY_OK marker in silver (transform removes it w
 the day). A day that fails stays unmarked, so the DAG keeps re-checking it on every run
 until it passes, instead of dropping it once it is no longer freshly transformed.
 
-Exit code 0 means every check passed; 1 means at least one failed (the DAG should stop).
+A day still inside the ingestion lookback window is settling: OpenAlex may not have indexed it
+fully, and ingestion re-fetches it on every run. If the row count is its only failure, it is
+deferred: not a failure, but not marked either, so gold leaves it out for now and the gate
+checks it again next run. Once it leaves the window its final version gets the full check.
+Warnings (a day far above its usual size) are logged and never block.
+
+Exit code 0 means nothing failed (deferred days allowed); 1 means at least one day failed
+(the DAG should stop).
 """
 
 import argparse
@@ -22,13 +29,14 @@ from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 
 from ingestion.bronze_writer import last_modified, s3_client
-from quality.checks import run_checks
+from ingestion.run import lookback_days
+from quality.checks import ROW_COUNT_CHECK, run_checks, run_warnings
 from transform.run import PARTITION, SILVER_BUCKET, quality_marker_key
 
 log = logging.getLogger("quality")
 
 
-SILVER_TABLES = ("works", "work_topics")
+SILVER_TABLES = ("works", "work_topics", "topics")
 
 
 def silver_days(s3) -> list[date]:
@@ -51,6 +59,12 @@ def unchecked_days(s3) -> list[date]:
     return [d for d in silver_days(s3) if not is_checked(s3, d)]
 
 
+def is_settling(day: date, today: date, lookback: int) -> bool:
+    """Inside the lookback window, which ingestion re-fetches every run: yesterday back to
+    `lookback` days ago. The last time a day is loaded it is `lookback` days old."""
+    return (today - day).days <= lookback
+
+
 def mark_checked(s3, day: date) -> None:
     s3.put_object(Bucket=SILVER_BUCKET, Key=quality_marker_key(day), Body=b"")
 
@@ -71,9 +85,10 @@ def try_read(s3, table: str, day: date) -> tuple[pl.DataFrame | None, str | None
 
 
 def gate(s3, days: list[date]) -> bool:
-    """Check the given silver days and mark each one that passes; True if all passed.
-    Used by the CLI and the DAG."""
+    """Check the given silver days and mark each one that passes; True if none failed
+    (deferred days do not count as failed). Used by the CLI and the DAG."""
     today = datetime.now(UTC).date()
+    lookback = lookback_days()
 
     # Row counts of every day, for the row-count baseline (earlier weeks of the same weekday).
     # A day whose works table cannot be read is left out of the baseline.
@@ -84,30 +99,43 @@ def gate(s3, days: list[date]) -> bool:
             counts[d] = works.height
 
     failed = False
+    deferred = []
     for day in days:
         log.info("== %s", day)
         works, works_error = try_read(s3, "works", day)
         topics, topics_error = try_read(s3, "work_topics", day)
-        if works is None or topics is None:
+        topic_dim, topic_dim_error = try_read(s3, "topics", day)
+        if works is None or topics is None or topic_dim is None:
             failed = True
             log.error("FAIL silver tables readable")
-            for reason in (works_error, topics_error):
+            for reason in (works_error, topics_error, topic_dim_error):
                 if reason:
                     log.error("     - %s", reason)
             continue
-        log.info("   %d works, %d work_topics", works.height, topics.height)
-        results = run_checks(works, topics, day, today, counts)
+        log.info("   %d works, %d work_topics, %d topics", works.height, topics.height, topic_dim.height)
+        results = run_checks(works, topics, day, today, counts, topic_dim)
+        failing = {name for name, problems in results.items() if problems}
+        defer = failing == {ROW_COUNT_CHECK} and is_settling(day, today, lookback)
         for name, problems in results.items():
-            if problems:
-                log.error("FAIL %s", name)
-                for problem in problems:
-                    log.error("     - %s", problem)
-            else:
+            if not problems:
                 log.info("ok   %s", name)
-        if any(results.values()):
+                continue
+            level, label = (logging.WARNING, "DEFER") if defer else (logging.ERROR, "FAIL ")
+            log.log(level, "%s %s", label, name)
+            for problem in problems:
+                log.log(level, "      - %s", problem)
+        for name, warnings in run_warnings(works, day, counts).items():
+            for warning in warnings:
+                log.warning("WARN  %s: %s (not blocking; gold filters it)", name, warning)
+        if defer:
+            deferred.append(day)
+            log.warning("      %s is within the %d-day lookback window: left unmarked, re-checked next run", day, lookback)
+        elif failing:
             failed = True
         else:
             mark_checked(s3, day)
+    if deferred:
+        log.warning("Deferred (still settling, not in gold yet): %s", ", ".join(d.isoformat() for d in deferred))
     if failed:
         log.error("Quality gate FAILED: do not promote to gold")
         return False

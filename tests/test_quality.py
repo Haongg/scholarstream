@@ -5,10 +5,13 @@ import polars as pl
 from quality.checks import (
     check_publication_date,
     check_row_count,
+    check_topic_dimension,
     check_topics_reference_works,
     check_topics_shape,
     check_work_id,
+    row_count_warnings,
     run_checks,
+    run_warnings,
 )
 
 DAY = date(2026, 10, 1)
@@ -27,6 +30,44 @@ def topics_df(rows):
 
 
 GOOD_TOPICS = [("W1", "T1", 1), ("W1", "T2", 2), ("W2", "T1", 1)]
+
+
+def topic_dim_df(*rows):
+    """topics table rows as (topic_id, subfield_id); the other names are filled in."""
+    return pl.DataFrame(
+        [
+            {
+                "topic_id": t, "topic_name": f"Topic {t}", "subfield_id": s, "subfield_name": "Sub",
+                "field_id": "17", "field_name": "Computer Science", "domain_id": "3", "domain_name": "Physical Sciences",
+            }
+            for t, s in rows
+        ]
+    )
+
+
+GOOD_TOPIC_DIM = topic_dim_df(("T1", "1707"), ("T2", "1702"))
+
+
+def test_topic_dimension_passes_on_good_data():
+    assert check_topic_dimension(topics_df(GOOD_TOPICS), GOOD_TOPIC_DIM) == []
+
+
+def test_topic_dimension_flags_topic_with_two_hierarchies():
+    problems = check_topic_dimension(topics_df(GOOD_TOPICS), topic_dim_df(("T1", "1707"), ("T1", "1702"), ("T2", "1702")))
+
+    assert any("more than one hierarchy: T1" in p for p in problems)
+
+
+def test_topic_dimension_flags_incomplete_hierarchy():
+    dim = GOOD_TOPIC_DIM.with_columns(pl.when(pl.col("topic_id") == "T2").then(None).otherwise(pl.col("field_id")).alias("field_id"))
+
+    assert any("miss a name" in p for p in check_topic_dimension(topics_df(GOOD_TOPICS), dim))
+
+
+def test_topic_dimension_flags_topic_used_but_not_described():
+    problems = check_topic_dimension(topics_df(GOOD_TOPICS), topic_dim_df(("T1", "1707")))
+
+    assert any("1 topic_ids in work_topics are missing" in p for p in problems)
 
 
 def test_work_id_passes_when_unique():
@@ -89,8 +130,20 @@ def test_row_count_accepts_normal_variation_and_flags_outliers():
     counts = weeks_before(SUNDAY, 5000, 5200, 4800, 5100)
 
     assert check_row_count(SUNDAY, 5300, counts) == []
-    assert check_row_count(SUNDAY, 2000, counts)  # under half of the median
-    assert check_row_count(SUNDAY, 11000, counts)  # over double the median
+    assert row_count_warnings(SUNDAY, 5300, counts) == []
+    assert "below" in check_row_count(SUNDAY, 2000, counts)[0]  # under half of the median
+
+
+def test_row_count_far_above_only_warns():
+    # e.g. 2026-11-15: a bulk upload to Zenodo, real data in the source, not a broken load
+    counts = weeks_before(SUNDAY, 1464, 1660, 1453)
+
+    assert check_row_count(SUNDAY, 3776, counts) == []
+    assert "above" in row_count_warnings(SUNDAY, 3776, counts)[0]
+
+
+def test_row_count_warnings_skipped_without_baseline():
+    assert row_count_warnings(SUNDAY, 100000, {}) == []
 
 
 def test_weekend_is_judged_against_earlier_weekends_not_weekdays():
@@ -113,16 +166,25 @@ def test_first_of_month_is_left_out_of_the_baseline():
     counts = {date(2026, 11, 22): 1600, date(2026, 11, 1): 9000}
 
     assert check_row_count(day, 1500, counts) == []
-    # Judged against 1,600 alone; with the 1st included the median would be 5,300 and pass it.
-    assert check_row_count(day, 4000, counts)
+    assert row_count_warnings(day, 1500, counts) == []
+    # Judged against 1,600 alone; with the 1st included the median would be 5,300 and not warn.
+    assert row_count_warnings(day, 4000, counts)
 
 
 def test_first_of_month_may_run_high_but_not_low():
     day = date(2026, 12, 1)
     counts = weeks_before(day, 3000, 2900, 3100)
 
-    assert check_row_count(day, 6400, counts) == []  # month-only dates land on the 1st
+    assert row_count_warnings(day, 6400, counts) == []  # month-only dates land on the 1st
     assert check_row_count(day, 1000, counts)
+
+
+def test_run_warnings_reports_by_name():
+    counts = weeks_before(SUNDAY, 1464, 1660, 1453)
+    works = pl.DataFrame({"work_id": [f"W{i}" for i in range(3776)]})
+
+    assert list(run_warnings(works, SUNDAY, counts)) == ["row count far above same weekday"]
+    assert run_warnings(works, SUNDAY, counts)["row count far above same weekday"]
 
 
 def test_null_publication_date_is_flagged():
@@ -162,12 +224,13 @@ def test_empty_day_fails_even_without_baseline():
 
 
 def test_run_checks_reports_every_check_by_name():
-    results = run_checks(works_df(), topics_df(GOOD_TOPICS), DAY, TODAY, weeks_before(DAY, 2, 2, 3))
+    results = run_checks(works_df(), topics_df(GOOD_TOPICS), DAY, TODAY, weeks_before(DAY, 2, 2, 3), GOOD_TOPIC_DIM)
 
     assert set(results) == {
         "work_id not null and unique",
         "topics reference works",
         "topics shape",
+        "topic dimension",
         "publication date",
         "row count vs same weekday",
     }
