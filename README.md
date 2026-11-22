@@ -55,7 +55,8 @@ All stages are orchestrated by **Apache Airflow**.
 
 ### 1. Incremental ingestion
 - Pulls works from the OpenAlex API, filtered by field and publication date, using cursor-based pagination
-- Stores a **watermark** (last successful load date) in Postgres so each run only fetches new or updated records
+- Stores a **watermark** (last successful load date) in Postgres so each run continues where the last one stopped
+- **Late-arriving data:** OpenAlex keeps adding works to a publication day for weeks, and filtering by index date (`from_created_date`) needs a paid plan. So every daily run re-fetches the last 7 days, and a weekly `refresh_openalex` DAG re-fetches days 8–60 back (about 6% of works arrived or changed after the 7-day window, measured on Oct–Nov 2026)
 - **Idempotent:** re-running the same date range produces no duplicates
 - Supports **backfill** for arbitrary historical date ranges
 
@@ -134,7 +135,7 @@ docker compose up -d
 Then open:
 - Airflow UI: http://localhost:8080
 - MinIO console: http://localhost:9001
-Trigger the `ingest_openalex` DAG to start the pipeline; `bronze_to_silver` (with the quality gate) runs after it, then `silver_to_gold` (dbt build + tests) once new silver days pass the gate.
+Trigger the `ingest_openalex` DAG to start the pipeline (`refresh_openalex` re-fetches older days every Sunday); `bronze_to_silver` (with the quality gate) runs after it, then `silver_to_gold` (dbt build + tests) once new silver days pass the gate.
 
 ### Build and test gold
 
