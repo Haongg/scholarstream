@@ -35,7 +35,7 @@ def uris(assets):
 
 def test_dags_import_cleanly(dagbag):
     assert dagbag.import_errors == {}
-    assert set(dagbag.dag_ids) == {"ingest_openalex", "bronze_to_silver", "silver_to_gold"}
+    assert set(dagbag.dag_ids) == {"ingest_openalex", "refresh_openalex", "bronze_to_silver", "silver_to_gold"}
 
 
 def test_ingest_runs_daily_after_budget_reset_and_emits_bronze(dagbag):
@@ -43,6 +43,13 @@ def test_ingest_runs_daily_after_budget_reset_and_emits_bronze(dagbag):
     assert dag.timetable.expression == "15 0 * * *"
     assert dag.max_active_runs == 1
     assert uris(dag.get_task("ingest").outlets) == {"s3://bronze/works"}
+
+
+def test_refresh_runs_weekly_after_the_daily_load_and_emits_bronze(dagbag):
+    dag = dagbag.dags["refresh_openalex"]
+    assert dag.timetable.expression == "0 1 * * 0"  # Sunday 01:00, after the 00:15 daily run
+    assert dag.max_active_runs == 1
+    assert uris(dag.get_task("refresh").outlets) == {"s3://bronze/works"}
 
 
 def test_silver_is_triggered_by_bronze(dagbag):
