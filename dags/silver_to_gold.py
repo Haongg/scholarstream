@@ -12,14 +12,19 @@ The project is mounted read-only, so dbt's target/, logs/ and DuckDB catalog go 
 the catalog only holds views over gold's Parquet, which lives in the gold bucket.
 """
 
+import logging
 from datetime import UTC, datetime
 
 from airflow.sdk import dag, task
 from scholarstream_assets import GOLD, SILVER_WORKS
 
+from monitoring.callbacks import TASK_CALLBACKS
+
 DBT = "/opt/dbt/bin/dbt"
 PROJECT = "/opt/airflow/project/dbt"
 SCRATCH = "/tmp/dbt"
+
+log = logging.getLogger(__name__)
 
 
 @dag(
@@ -27,6 +32,7 @@ SCRATCH = "/tmp/dbt"
     schedule=[SILVER_WORKS],
     start_date=datetime(2026, 11, 1, tzinfo=UTC),
     catchup=False,
+    default_args=TASK_CALLBACKS,  # record each task's outcome; failures log an ALERT
     max_active_runs=1,  # one writer of the gold files at a time
     tags=["scholarstream", "gold"],
     doc_md=__doc__,
@@ -44,7 +50,24 @@ def silver_to_gold():
     def dbt_build() -> str:
         return f"cd {PROJECT} && {DBT} build --profiles-dir ."
 
-    dbt_build()
+    @task
+    def gold_metrics() -> None:
+        """Works per day in the gold just built. Best-effort: never fails the run, since gold
+        is already built, tested and announced by dbt_build."""
+        from airflow.sdk import get_current_context
+
+        from ingestion.bronze_writer import s3_client
+        from monitoring.gold import works_per_day
+        from monitoring.metrics import DayMetric, record_days
+
+        try:
+            counts = works_per_day(s3_client())
+        except Exception as exc:  # noqa: BLE001 -- metrics must never fail the pipeline
+            log.warning("Could not read gold for metrics: %s: %s", type(exc).__name__, exc)
+            return
+        record_days(get_current_context(), "gold", [DayMetric(d, n, "built") for d, n in sorted(counts.items())])
+
+    dbt_build() >> gold_metrics()
 
 
 silver_to_gold()

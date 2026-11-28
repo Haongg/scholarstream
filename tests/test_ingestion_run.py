@@ -26,10 +26,17 @@ class FakeClient:
     def __init__(self, *runs):
         self.runs = list(runs)
         self.calls = 0
+        self.requests = 0  # one credit per page, like OpenAlexClient
+        self.credits_remaining = None
 
     def iter_pages(self, from_date, to_date):
         self.calls += 1
-        yield from self.runs.pop(0)
+        run = self.runs.pop(0)
+        if isinstance(run, Exception):
+            raise run
+        for p in run:
+            self.requests += 1
+            yield p
 
 
 class FakeWriter:
@@ -201,3 +208,38 @@ def test_cli_exit_codes(monkeypatch, outcome, code):
     monkeypatch.setattr(run, "load_dotenv", lambda: None)
 
     assert run.main([]) == code
+
+
+class FakeWatermark:
+    def __init__(self):
+        self.advanced = []
+
+    def advance(self, day):
+        self.advanced.append(day)
+
+
+def test_load_days_reports_works_per_day_and_credits():
+    day2 = DAY + timedelta(days=1)
+    client = FakeClient([page(["W1", "W2"], 3), page(["W3"], 3)], [page(["W4"], 1)])
+    result = run.IngestResult()
+
+    run.load_days(client, FakeWriter(), FakeWatermark(), DAY, day2, result)
+
+    assert result.loaded == [DAY, day2]
+    assert result.works == {DAY: 3, day2: 1}
+    assert result.credits_used == 3
+    assert not result.budget_exhausted
+
+
+def test_spent_budget_still_reports_the_credits_used():
+    day2 = DAY + timedelta(days=1)
+    client = FakeClient([page(["W1"], 1)], run.BudgetExhausted("daily budget spent"))
+    watermark = FakeWatermark()
+    result = run.IngestResult()
+
+    run.load_days(client, FakeWriter(), watermark, DAY, day2, result)
+
+    assert result.budget_exhausted
+    assert result.loaded == [DAY] == watermark.advanced
+    assert result.works == {DAY: 1}
+    assert result.credits_used == 1

@@ -35,7 +35,34 @@ def uris(assets):
 
 def test_dags_import_cleanly(dagbag):
     assert dagbag.import_errors == {}
-    assert set(dagbag.dag_ids) == {"ingest_openalex", "refresh_openalex", "bronze_to_silver", "silver_to_gold"}
+    assert set(dagbag.dag_ids) == {
+        "ingest_openalex",
+        "refresh_openalex",
+        "bronze_to_silver",
+        "silver_to_gold",
+        "pipeline_health",
+    }
+
+
+def test_health_runs_daily_after_the_nightly_chain_without_retries(dagbag):
+    dag = dagbag.dags["pipeline_health"]
+    assert dag.timetable.expression == "0 6 * * *"
+    assert dag.max_active_runs == 1
+    assert dag.get_task("check").retries == 0
+    assert dag.get_task("check").outlets == []
+
+
+def as_list(callback):
+    return callback if isinstance(callback, list) else [callback]
+
+
+def test_every_task_records_its_outcome_and_alerts_on_failure(dagbag):
+    from monitoring.callbacks import TASK_CALLBACKS
+
+    for dag in dagbag.dags.values():
+        for task in dag.tasks:
+            for name, callback in TASK_CALLBACKS.items():
+                assert callback in as_list(getattr(task, name)), f"{dag.dag_id}.{task.task_id} lacks {name}"
 
 
 def test_ingest_runs_daily_after_budget_reset_and_emits_bronze(dagbag):
@@ -72,3 +99,10 @@ def test_gold_is_triggered_only_by_checked_silver_and_emits_gold(dagbag):
     assert {a.uri for a in dag.timetable.asset_condition.objects} == {"s3://silver/works"}
     assert dag.max_active_runs == 1  # one writer of the gold files at a time
     assert uris(dag.get_task("dbt_build").outlets) == {"s3://gold/"}
+
+
+def test_gold_metrics_run_after_the_build_and_announce_nothing(dagbag):
+    dag = dagbag.dags["silver_to_gold"]
+    metrics = dag.get_task("gold_metrics")
+    assert metrics.upstream_task_ids == {"dbt_build"}
+    assert metrics.outlets == []  # GOLD comes from dbt_build alone

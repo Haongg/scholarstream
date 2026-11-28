@@ -31,6 +31,8 @@ class OpenAlexClient:
         self.max_retries = max_retries
         self.backoff = backoff
         self._sleep = sleep
+        self.requests = 0  # successful requests, i.e. credits spent (1 per page, list endpoint)
+        self.credits_remaining: int | None = None  # from the last response's rate-limit header
 
     def iter_pages(
         self,
@@ -75,6 +77,10 @@ class OpenAlexClient:
                 continue
 
             if resp.status_code == 200:
+                self.requests += 1
+                remaining = resp.headers.get("x-ratelimit-remaining")
+                if remaining is not None and remaining.isdigit():
+                    self.credits_remaining = int(remaining)
                 return resp.json()
             if resp.status_code == 429:
                 # Per-second limits cost nothing, so wait and retry; a spent daily budget won't recover.

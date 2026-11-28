@@ -8,9 +8,34 @@ on:
 permissions:
   contents: read
 
+# A throwaway Postgres per job for tests/test_metrics.py (run metrics are upserts, which only
+# a real database can prove). The credentials only exist inside the job, so no secret needed.
+# REQUIRE_POSTGRES makes those tests fail, not skip, if the service is not reachable.
+env:
+  POSTGRES_HOST: localhost
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: ci
+  POSTGRES_PASSWORD: ci
+  POSTGRES_DB: scholarstream
+  REQUIRE_POSTGRES: "1"
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18  # same as docker-compose.yml
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: scholarstream
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d scholarstream"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -32,6 +57,20 @@ jobs:
   # the whole suite also run in that environment: it is what the containers actually use.
   dags:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: scholarstream
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d scholarstream"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       AIRFLOW_VERSION: "3.3.2"
       PYTHON_VERSION: "3.14"

@@ -75,3 +75,28 @@ def test_client_errors_are_not_retried():
     with pytest.raises(httpx.HTTPStatusError):
         list(make_client(handler).iter_pages(date(2026, 10, 1), date(2026, 10, 1)))
     assert len(attempts) == 1
+
+
+def test_counts_credits_and_reads_the_remaining_budget():
+    calls = iter(
+        [
+            httpx.Response(503),  # failed requests cost nothing
+            httpx.Response(200, json=page(["W1"], "abc"), headers={"x-ratelimit-remaining": "9998"}),
+            httpx.Response(200, json=page(["W2"], None), headers={"x-ratelimit-remaining": "9997"}),
+        ]
+    )
+    client = make_client(lambda request: next(calls))
+
+    list(client.iter_pages(date(2026, 10, 1), date(2026, 10, 1)))
+
+    assert client.requests == 2
+    assert client.credits_remaining == 9997
+
+
+def test_missing_rate_limit_header_leaves_remaining_unknown():
+    client = make_client(lambda request: httpx.Response(200, json=page([], None)))
+
+    list(client.iter_pages(date(2026, 10, 1), date(2026, 10, 1)))
+
+    assert client.requests == 1
+    assert client.credits_remaining is None
