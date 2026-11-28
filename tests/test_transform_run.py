@@ -10,6 +10,7 @@ import polars as pl
 from botocore.exceptions import ClientError
 
 from transform import run as transform_run
+from transform.silver import SILVER_TABLES
 
 D1, D2 = date(2026, 10, 1), date(2026, 10, 2)
 T0, T1, T2 = (datetime(2026, 11, 1, h, tzinfo=UTC) for h in (1, 2, 3))
@@ -76,7 +77,7 @@ def run(monkeypatch, objects, argv=()):
 
     def fake_to_tables(works):
         seen.append([w["id"] for w in works])
-        return pl.DataFrame(), pl.DataFrame(), pl.DataFrame()
+        return {name: pl.DataFrame() for name in SILVER_TABLES}
 
     monkeypatch.setattr(transform_run, "to_tables", fake_to_tables)
     assert transform_run.main(list(argv)) == 0
@@ -114,14 +115,16 @@ def test_rewriting_a_day_first_removes_its_quality_marker(monkeypatch):
 
     assert ("silver", marker) not in s3.objects
     assert s3.ops[0] == ("delete", marker)  # before any silver file is written
-    assert [op for op, _ in s3.ops[1:]] == ["put", "put", "put"]
+    assert [op for op, _ in s3.ops[1:]] == ["put"] * len(SILVER_TABLES)
 
 
 def test_work_topics_is_written_last(monkeypatch):
     # stale_days takes the work_topics timestamp as "silver finished", so it must come last.
     s3, _ = run(monkeypatch, bronze(D1, "W1"))
 
-    assert [k.split("/")[0] for k in s3.written] == ["works", "topics", "work_topics"]
+    written = [k.split("/")[0] for k in s3.written]
+    assert sorted(written) == sorted(SILVER_TABLES)
+    assert written[-1] == "work_topics"
 
 
 def test_stale_ignores_partial_days(monkeypatch):

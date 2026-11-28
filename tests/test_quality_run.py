@@ -9,6 +9,15 @@ import pytest
 from botocore.exceptions import ClientError
 
 from quality import run as quality_run
+from transform import silver
+
+# Authorship tables are optional content (a day may have no authors), so empty ones pass.
+AUTHORSHIP_TABLES = {
+    "authors": silver.AUTHORS_SCHEMA,
+    "institutions": silver.INSTITUTIONS_SCHEMA,
+    "work_authorships": silver.WORK_AUTHORSHIPS_SCHEMA,
+    "authorship_institutions": silver.AUTHORSHIP_INSTITUTIONS_SCHEMA,
+}
 
 
 def parquet_bytes(df: pl.DataFrame) -> bytes:
@@ -76,6 +85,7 @@ def good_day(day: date, n: int = 2) -> dict[str, bytes]:
         key("works", day): works_bytes(day, n),
         key("work_topics", day): topics_bytes(n),
         key("topics", day): topic_dim_bytes(),
+        **{key(name, day): parquet_bytes(pl.DataFrame(schema=schema)) for name, schema in AUTHORSHIP_TABLES.items()},
     }
 
 

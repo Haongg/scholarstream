@@ -27,7 +27,7 @@ from ingestion.bronze_writer import (
     last_modified,
     s3_client,
 )
-from transform.silver import to_tables
+from transform.silver import SILVER_TABLES, to_tables
 
 SILVER_BUCKET = "silver"
 PARTITION = "publication_date="
@@ -71,15 +71,15 @@ def write_table(s3, table: str, day: date, df: pl.DataFrame) -> None:
     s3.put_object(Bucket=SILVER_BUCKET, Key=key, Body=buffer.getvalue())
 
 
-def transform_day(s3, day: date) -> tuple[int, int, int]:
-    works, work_topics, topics = to_tables(read_day(s3, day))
+def transform_day(s3, day: date) -> dict[str, int]:
+    """Rewrite a day's silver tables; returns rows per table."""
+    tables = to_tables(read_day(s3, day))
     # The day's silver is about to change, so its earlier quality pass no longer holds. Removed
     # first: if the writes below fail halfway, the day is left unchecked, never falsely passed.
     s3.delete_object(Bucket=SILVER_BUCKET, Key=quality_marker_key(day))
-    write_table(s3, "works", day, works)
-    write_table(s3, "topics", day, topics)
-    write_table(s3, "work_topics", day, work_topics)  # last: stale_days reads its timestamp
-    return len(works), len(work_topics), len(topics)
+    for name in SILVER_TABLES:  # work_topics last: stale_days reads its timestamp
+        write_table(s3, name, day, tables[name])
+    return {name: len(tables[name]) for name in SILVER_TABLES}
 
 
 def complete_days(s3, start: date | None = None, end: date | None = None) -> dict[date, datetime]:
@@ -112,12 +112,17 @@ def stale_days(s3) -> list[date]:
     return stale
 
 
-def transform_days(s3, days: list[date]) -> dict[date, tuple[int, int, int]]:
-    """Transform each day; returns its (works, work_topics, topics) row counts."""
+def describe_counts(counts: dict[str, int]) -> str:
+    """{'works': 5, 'topics': 3} -> '5 works, 3 topics'."""
+    return ", ".join(f"{rows} {name}" for name, rows in counts.items())
+
+
+def transform_days(s3, days: list[date]) -> dict[date, dict[str, int]]:
+    """Transform each day; returns its rows per silver table."""
     counts = {}
     for day in days:
-        counts[day] = works, work_topics, topics = transform_day(s3, day)
-        log.info("Silver %s: %d works, %d work_topics, %d topics", day, works, work_topics, topics)
+        counts[day] = transform_day(s3, day)
+        log.info("Silver %s: %s", day, describe_counts(counts[day]))
     return counts
 
 

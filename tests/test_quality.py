@@ -3,6 +3,9 @@ from datetime import date, timedelta
 import polars as pl
 
 from quality.checks import (
+    check_authorship_institutions,
+    check_authorships_shape,
+    check_dimension,
     check_publication_date,
     check_row_count,
     check_topic_dimension,
@@ -224,14 +227,125 @@ def test_empty_day_fails_even_without_baseline():
 
 
 def test_run_checks_reports_every_check_by_name():
-    results = run_checks(works_df(), topics_df(GOOD_TOPICS), DAY, TODAY, weeks_before(DAY, 2, 2, 3), GOOD_TOPIC_DIM)
+    tables = {
+        "works": works_df(),
+        "work_topics": topics_df(GOOD_TOPICS),
+        "topics": GOOD_TOPIC_DIM,
+        "work_authorships": slots_df(GOOD_SLOTS),
+        "authorship_institutions": links_df(GOOD_LINKS),
+        "authors": authors_df("A1", "A2"),
+        "institutions": institutions_df("I1"),
+    }
+    results = run_checks(tables, DAY, TODAY, weeks_before(DAY, 2, 2, 3))
 
     assert set(results) == {
         "work_id not null and unique",
         "topics reference works",
         "topics shape",
         "topic dimension",
+        "authorships shape",
+        "authorship institutions",
+        "author dimension",
+        "institution dimension",
         "publication date",
         "row count vs same weekday",
     }
     assert all(problems == [] for problems in results.values())
+
+
+def slots_df(rows):
+    """work_authorships rows as (work_id, author_order, author_id, author_position)."""
+    schema = {"work_id": pl.String, "author_order": pl.Int64, "author_id": pl.String, "author_position": pl.String}
+    return pl.DataFrame(rows, schema=schema, orient="row")
+
+
+def links_df(rows):
+    schema = {"work_id": pl.String, "author_order": pl.Int64, "institution_id": pl.String}
+    return pl.DataFrame(rows, schema=schema, orient="row")
+
+
+def authors_df(*ids, name="An Author"):
+    return pl.DataFrame({"author_id": list(ids), "author_name": [name] * len(ids)}, schema={"author_id": pl.String, "author_name": pl.String})
+
+
+def institutions_df(*ids):
+    return pl.DataFrame(
+        {"institution_id": list(ids), "institution_name": ["MIT"] * len(ids)},
+        schema={"institution_id": pl.String, "institution_name": pl.String},
+    )
+
+
+# W1 has two authors (the second without an author id), W2 none: both are fine.
+GOOD_SLOTS = [("W1", 1, "A1", "first"), ("W1", 2, None, "last")]
+GOOD_LINKS = [("W1", 1, "I1")]
+
+
+def test_authorships_shape_passes_on_good_data():
+    assert check_authorships_shape(works_df(), slots_df(GOOD_SLOTS)) == []
+
+
+def test_authorships_shape_allows_same_author_twice_in_a_work():
+    slots = slots_df([("W1", 1, "A1", "first"), ("W1", 2, "A1", "middle"), ("W1", 3, "A2", "last")])
+
+    assert check_authorships_shape(works_df(), slots) == []
+
+
+def test_authorships_shape_flags_orphan_duplicate_slot_and_bad_position():
+    slots = slots_df([("W1", 1, "A1", "first"), ("W1", 1, "A2", "middle"), ("W1", 2, "A3", "editor"), ("W9", 1, "A4", "first")])
+
+    problems = check_authorships_shape(works_df(), slots)
+
+    assert any("1 work_authorships rows point to a work missing" in p for p in problems)
+    assert any("2 work_authorships rows repeat a (work_id, author_order)" in p for p in problems)
+    assert any("1 work_authorships rows have a position outside first/middle/last" in p for p in problems)
+
+
+def test_authorships_shape_flags_null_key_and_null_position():
+    slots = slots_df([("W1", None, "A1", "first"), ("W2", 1, "A2", None)])
+
+    problems = check_authorships_shape(works_df(), slots)
+
+    assert any("1 work_authorships rows have a null work_id or author_order" in p for p in problems)
+    assert any("1 work_authorships rows have a position outside" in p for p in problems)
+
+
+def test_authorships_shape_needs_exactly_one_first_author():
+    slots = slots_df([("W1", 1, "A1", "first"), ("W1", 2, "A2", "first"), ("W2", 1, "A3", "last")])
+
+    assert any("2 works with authors do not have exactly one first author" in p for p in check_authorships_shape(works_df(), slots))
+
+
+def test_authorship_institutions_pass_on_good_data():
+    assert check_authorship_institutions(slots_df(GOOD_SLOTS), links_df(GOOD_LINKS)) == []
+
+
+def test_authorship_institutions_flag_null_repeat_and_missing_slot():
+    links = links_df([("W1", 1, None), ("W1", 1, "I1"), ("W1", 1, "I1"), ("W1", 7, "I2")])
+
+    problems = check_authorship_institutions(slots_df(GOOD_SLOTS), links)
+
+    assert any("1 authorship_institutions rows have a null institution_id" in p for p in problems)
+    assert any("2 authorship_institutions rows are repeated" in p for p in problems)
+    assert any("1 authorship_institutions rows point to an author slot missing" in p for p in problems)
+
+
+def test_dimension_passes_and_ignores_null_ids_in_use():
+    used = pl.Series(["A1", None, "A1"], dtype=pl.String)
+
+    assert check_dimension("authors", authors_df("A1"), "author_id", ("author_name",), used) == []
+
+
+def test_dimension_flags_conflict_missing_name_and_undescribed_id():
+    dim = pl.concat([authors_df("A1", name="Ann"), authors_df("A1", name="A."), authors_df("A2", name=None)])
+
+    problems = check_dimension("authors", dim, "author_id", ("author_name",), pl.Series(["A1", "A3"]))
+
+    assert any("1 authors appear with conflicting records: A1" in p for p in problems)
+    assert any("1 authors rows miss author_name" in p for p in problems)
+    assert any("1 author_ids in use are missing from authors" in p for p in problems)
+
+
+def test_dimension_flags_null_id():
+    problems = check_dimension("institutions", institutions_df(None), "institution_id", ("institution_name",), pl.Series([], dtype=pl.String))
+
+    assert problems == ["1 institutions rows have a null institution_id"]
