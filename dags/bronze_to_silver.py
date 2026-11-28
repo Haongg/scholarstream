@@ -23,6 +23,8 @@ from airflow.sdk import dag, get_current_context, task
 from airflow.sdk.exceptions import AirflowFailException, AirflowSkipException
 from scholarstream_assets import BRONZE_WORKS, SILVER_WORKS
 
+from monitoring.callbacks import TASK_CALLBACKS
+
 log = logging.getLogger(__name__)
 
 
@@ -31,6 +33,7 @@ log = logging.getLogger(__name__)
     schedule=[BRONZE_WORKS],
     start_date=datetime(2026, 11, 1, tzinfo=UTC),
     catchup=False,
+    default_args=TASK_CALLBACKS,  # record each task's outcome; failures log an ALERT
     max_active_runs=1,  # events arriving meanwhile are folded into the next run
     tags=["scholarstream", "silver"],
     doc_md=__doc__,

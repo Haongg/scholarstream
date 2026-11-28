@@ -18,6 +18,8 @@ from datetime import UTC, datetime
 from airflow.sdk import dag, task
 from scholarstream_assets import GOLD, SILVER_WORKS
 
+from monitoring.callbacks import TASK_CALLBACKS
+
 DBT = "/opt/dbt/bin/dbt"
 PROJECT = "/opt/airflow/project/dbt"
 SCRATCH = "/tmp/dbt"
@@ -30,6 +32,7 @@ log = logging.getLogger(__name__)
     schedule=[SILVER_WORKS],
     start_date=datetime(2026, 11, 1, tzinfo=UTC),
     catchup=False,
+    default_args=TASK_CALLBACKS,  # record each task's outcome; failures log an ALERT
     max_active_runs=1,  # one writer of the gold files at a time
     tags=["scholarstream", "gold"],
     doc_md=__doc__,

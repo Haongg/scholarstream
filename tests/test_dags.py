@@ -38,6 +38,19 @@ def test_dags_import_cleanly(dagbag):
     assert set(dagbag.dag_ids) == {"ingest_openalex", "refresh_openalex", "bronze_to_silver", "silver_to_gold"}
 
 
+def as_list(callback):
+    return callback if isinstance(callback, list) else [callback]
+
+
+def test_every_task_records_its_outcome_and_alerts_on_failure(dagbag):
+    from monitoring.callbacks import TASK_CALLBACKS
+
+    for dag in dagbag.dags.values():
+        for task in dag.tasks:
+            for name, callback in TASK_CALLBACKS.items():
+                assert callback in as_list(getattr(task, name)), f"{dag.dag_id}.{task.task_id} lacks {name}"
+
+
 def test_ingest_runs_daily_after_budget_reset_and_emits_bronze(dagbag):
     dag = dagbag.dags["ingest_openalex"]
     assert dag.timetable.expression == "15 0 * * *"

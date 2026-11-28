@@ -29,7 +29,7 @@ DDL = (
         dag_id TEXT NOT NULL,
         run_id TEXT NOT NULL,
         task_id TEXT NOT NULL,
-        status TEXT NOT NULL,  -- running (task wrote its metrics), success, up_for_retry, failed
+        status TEXT NOT NULL,  -- running (task wrote its metrics), success, skipped, up_for_retry, failed
         try_number INT,
         started_at TIMESTAMPTZ,
         finished_at TIMESTAMPTZ,

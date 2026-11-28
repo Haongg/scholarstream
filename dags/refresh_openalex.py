@@ -17,6 +17,8 @@ from datetime import UTC, datetime, timedelta
 from airflow.sdk import CronTriggerTimetable, dag, get_current_context, task
 from scholarstream_assets import BRONZE_WORKS
 
+from monitoring.callbacks import TASK_CALLBACKS
+
 log = logging.getLogger(__name__)
 
 
@@ -26,7 +28,7 @@ log = logging.getLogger(__name__)
     start_date=datetime(2026, 11, 1, tzinfo=UTC),
     catchup=False,
     max_active_runs=1,
-    default_args={"retries": 1, "retry_delay": timedelta(minutes=10)},  # a count mismatch may clear up
+    default_args={**TASK_CALLBACKS, "retries": 1, "retry_delay": timedelta(minutes=10)},  # a count mismatch may clear up
     tags=["scholarstream", "bronze"],
     doc_md=__doc__,
 )
