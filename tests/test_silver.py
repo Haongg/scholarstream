@@ -55,7 +55,7 @@ def test_latest_versions_keeps_newest_per_work():
 
 
 def test_to_tables_builds_works_row():
-    works, _, _ = to_tables([raw_work()])
+    works = to_tables([raw_work()])["works"]
 
     row = works.row(0, named=True)
     assert row["work_id"] == "W1"
@@ -66,7 +66,7 @@ def test_to_tables_builds_works_row():
 
 
 def test_to_tables_splits_topics_with_rank():
-    _, topics, _ = to_tables([raw_work()])
+    topics = to_tables([raw_work()])["work_topics"]
 
     assert topics.select("work_id", "topic_id", "rank", "score").rows() == [
         ("W1", "T1", 1, 0.7),
@@ -76,7 +76,8 @@ def test_to_tables_splits_topics_with_rank():
 
 
 def test_to_tables_keeps_work_without_abstract():
-    works, topics, _ = to_tables([raw_work(abstract_inverted_index=None)])
+    tables = to_tables([raw_work(abstract_inverted_index=None)])
+    works, topics = tables["works"], tables["work_topics"]
 
     assert works["abstract"].to_list() == [None]
     assert len(topics) == 3
@@ -86,7 +87,8 @@ def test_to_tables_uses_topics_of_the_latest_version_only():
     old = raw_work(updated="2026-10-01T10:00:00", topics=[raw_topic("T9", 1.0)])
     new = raw_work(updated="2026-10-05T10:00:00")
 
-    works, topics, topic_dim = to_tables([old, new])
+    tables = to_tables([old, new])
+    works, topics, topic_dim = tables["works"], tables["work_topics"], tables["topics"]
 
     assert len(works) == 1
     assert topics["topic_id"].to_list() == ["T1", "T2", "T3"]
@@ -94,14 +96,15 @@ def test_to_tables_uses_topics_of_the_latest_version_only():
 
 
 def test_to_tables_empty_input_keeps_schema():
-    works, topics, topic_dim = to_tables([])
+    tables = to_tables([])
+    works, topics, topic_dim = tables["works"], tables["work_topics"], tables["topics"]
 
     assert works.is_empty() and topics.is_empty() and topic_dim.is_empty()
     assert "work_id" in works.columns and "rank" in topics.columns and "domain_name" in topic_dim.columns
 
 
 def test_topics_table_flattens_hierarchy_to_short_ids():
-    _, _, topic_dim = to_tables([raw_work()])
+    topic_dim = to_tables([raw_work()])["topics"]
 
     assert topic_dim.row(0, named=True) == {
         "topic_id": "T1",
@@ -116,7 +119,7 @@ def test_topics_table_flattens_hierarchy_to_short_ids():
 
 
 def test_topics_table_has_one_row_per_topic_shared_by_works():
-    _, _, topic_dim = to_tables([raw_work("https://openalex.org/W1"), raw_work("https://openalex.org/W2")])
+    topic_dim = to_tables([raw_work("https://openalex.org/W1"), raw_work("https://openalex.org/W2")])["topics"]
 
     assert topic_dim["topic_id"].to_list() == ["T1", "T2", "T3"]
 
@@ -125,13 +128,13 @@ def test_topics_table_keeps_conflicting_hierarchies_for_the_gate():
     w1 = raw_work("https://openalex.org/W1", topics=[raw_topic("T1", 0.9)])
     w2 = raw_work("https://openalex.org/W2", topics=[raw_topic("T1", 0.9, subfield=("1702", "Artificial Intelligence"))])
 
-    _, _, topic_dim = to_tables([w1, w2])
+    topic_dim = to_tables([w1, w2])["topics"]
 
     assert sorted(topic_dim["subfield_id"].to_list()) == ["1702", "1707"]
 
 
 def test_topics_table_tolerates_missing_hierarchy():
-    _, _, topic_dim = to_tables([raw_work(topics=[{"id": "https://openalex.org/T1", "score": 0.5}])])
+    topic_dim = to_tables([raw_work(topics=[{"id": "https://openalex.org/T1", "score": 0.5}])])["topics"]
 
     row = topic_dim.row(0, named=True)
     assert row["topic_id"] == "T1" and row["subfield_id"] is None and row["domain_name"] is None

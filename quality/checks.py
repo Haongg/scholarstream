@@ -162,16 +162,13 @@ def row_count_warnings(day: date, count: int, counts: dict[date, int]) -> list[s
 
 
 def run_checks(
-    works: pl.DataFrame,
-    topics: pl.DataFrame,
-    day: date,
-    today: date,
-    counts: dict[date, int],
-    topic_dim: pl.DataFrame,
+    tables: dict[str, pl.DataFrame], day: date, today: date, counts: dict[date, int]
 ) -> dict[str, list[str]]:
     """Run every check for one day and return {check name: problems}.
 
-    `topics` is work_topics, `topic_dim` the topics table; `counts`: works per day."""
+    `tables`: the day's silver tables by name (transform.silver.SILVER_TABLES);
+    `counts`: works per day."""
+    works, topics, topic_dim = tables["works"], tables["work_topics"], tables["topics"]
     return {
         "work_id not null and unique": check_work_id(works),
         "topics reference works": check_topics_reference_works(works, topics),

@@ -43,7 +43,7 @@ def bronze_to_silver():
     def transform() -> list[str]:
         from ingestion.bronze_writer import s3_client
         from monitoring.metrics import DayMetric, record_days
-        from transform.run import stale_days, transform_days
+        from transform.run import describe_counts, stale_days, transform_days
 
         s3 = s3_client()
         days = stale_days(s3)
@@ -52,8 +52,13 @@ def bronze_to_silver():
             get_current_context(),
             "silver",
             [
-                DayMetric(day, works, "transformed", f"{work_topics} work_topics, {topics} topics")
-                for day, (works, work_topics, topics) in counts.items()
+                DayMetric(
+                    day,
+                    rows["works"],
+                    "transformed",
+                    describe_counts({name: n for name, n in rows.items() if name != "works"}),
+                )
+                for day, rows in counts.items()
             ],
         )
         return [d.isoformat() for d in days]

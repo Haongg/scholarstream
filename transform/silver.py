@@ -6,6 +6,10 @@ from datetime import date, datetime
 
 import polars as pl
 
+# Every silver table of a day, in the order transform writes them. work_topics comes last:
+# its write time is when the day's silver was finished (see transform.run.stale_days).
+SILVER_TABLES = ("works", "topics", "work_topics")
+
 WORKS_SCHEMA = {
     "work_id": pl.String,
     "title": pl.String,
@@ -75,8 +79,9 @@ def topic_row(topic: dict) -> dict:
     return row
 
 
-def to_tables(works: Iterable[dict]) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-    """Deduplicate raw works and split them into the `works`, `work_topics` and `topics` tables.
+def to_tables(works: Iterable[dict]) -> dict[str, pl.DataFrame]:
+    """Deduplicate raw works and split them into the silver tables, keyed and ordered as
+    SILVER_TABLES.
 
     `topics` holds one row per distinct topic of the day. Only exact repeats are dropped: a
     topic seen with two different hierarchies keeps both rows, so the quality gate flags it
@@ -109,8 +114,9 @@ def to_tables(works: Iterable[dict]) -> tuple[pl.DataFrame, pl.DataFrame, pl.Dat
                 }
             )
             topic_dim_rows.append(topic_row(topic))
-    return (
-        pl.DataFrame(work_rows, schema=WORKS_SCHEMA),
-        pl.DataFrame(topic_rows, schema=WORK_TOPICS_SCHEMA),
-        pl.DataFrame(topic_dim_rows, schema=TOPICS_SCHEMA).unique().sort("topic_id"),
-    )
+    tables = {
+        "works": pl.DataFrame(work_rows, schema=WORKS_SCHEMA),
+        "topics": pl.DataFrame(topic_dim_rows, schema=TOPICS_SCHEMA).unique().sort("topic_id"),
+        "work_topics": pl.DataFrame(topic_rows, schema=WORK_TOPICS_SCHEMA),
+    }
+    return {name: tables[name] for name in SILVER_TABLES}

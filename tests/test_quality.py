@@ -224,7 +224,8 @@ def test_empty_day_fails_even_without_baseline():
 
 
 def test_run_checks_reports_every_check_by_name():
-    results = run_checks(works_df(), topics_df(GOOD_TOPICS), DAY, TODAY, weeks_before(DAY, 2, 2, 3), GOOD_TOPIC_DIM)
+    tables = {"works": works_df(), "work_topics": topics_df(GOOD_TOPICS), "topics": GOOD_TOPIC_DIM}
+    results = run_checks(tables, DAY, TODAY, weeks_before(DAY, 2, 2, 3))
 
     assert set(results) == {
         "work_id not null and unique",

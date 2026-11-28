@@ -32,12 +32,10 @@ from dotenv import load_dotenv
 from ingestion.bronze_writer import last_modified, s3_client
 from ingestion.run import lookback_days
 from quality.checks import ROW_COUNT_CHECK, run_checks, run_warnings
-from transform.run import PARTITION, SILVER_BUCKET, quality_marker_key
+from transform.run import PARTITION, SILVER_BUCKET, describe_counts, quality_marker_key
+from transform.silver import SILVER_TABLES
 
 log = logging.getLogger("quality")
-
-
-SILVER_TABLES = ("works", "work_topics", "topics")
 
 
 def silver_days(s3) -> list[date]:
@@ -126,11 +124,13 @@ def gate(s3, days: list[date]) -> GateResult:
     result = GateResult()
     for day in days:
         log.info("== %s", day)
-        works, works_error = try_read(s3, "works", day)
-        topics, topics_error = try_read(s3, "work_topics", day)
-        topic_dim, topic_dim_error = try_read(s3, "topics", day)
-        if works is None or topics is None or topic_dim is None:
-            reasons = [r for r in (works_error, topics_error, topic_dim_error) if r]
+        tables, reasons = {}, []
+        for name in SILVER_TABLES:
+            tables[name], reason = try_read(s3, name, day)
+            if reason:
+                reasons.append(reason)
+        works = tables["works"]
+        if reasons:
             log.error("FAIL silver tables readable")
             for reason in reasons:
                 log.error("     - %s", reason)
@@ -138,8 +138,8 @@ def gate(s3, days: list[date]) -> GateResult:
                 FAILED, works.height if works is not None else None, [f"silver tables readable: {r}" for r in reasons]
             )
             continue
-        log.info("   %d works, %d work_topics, %d topics", works.height, topics.height, topic_dim.height)
-        results = run_checks(works, topics, day, today, counts, topic_dim)
+        log.info("   %s", describe_counts({name: t.height for name, t in tables.items()}))
+        results = run_checks(tables, day, today, counts)
         failing = {name for name, problems in results.items() if problems}
         defer = failing == {ROW_COUNT_CHECK} and is_settling(day, today, lookback)
         verdict = DayVerdict(DEFERRED if defer else FAILED if failing else PASSED, works.height)
