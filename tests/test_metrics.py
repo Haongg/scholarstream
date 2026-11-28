@@ -1,7 +1,8 @@
 """Tests for monitoring.metrics against a real Postgres, in a throwaway schema.
 
-Uses the credentials from .env (the local compose stack) and skips when Postgres is not
-reachable, e.g. in CI. The schema is dropped afterwards, so the real tables are untouched.
+Uses the credentials from .env (the local compose stack) or the environment (CI's Postgres
+service) and skips when Postgres is not reachable, unless REQUIRE_POSTGRES is set (CI).
+The schema is dropped afterwards, so the real tables are untouched.
 """
 
 import logging
@@ -37,12 +38,15 @@ def pg(monkeypatch):
     for name, value in dotenv_values(ROOT / ".env").items():
         if name.startswith("POSTGRES_") and value is not None:
             monkeypatch.setenv(name, value)
+    # CI sets REQUIRE_POSTGRES (it runs a Postgres service), so a broken service fails the
+    # run instead of silently skipping these tests.
+    unavailable = pytest.fail if os.getenv("REQUIRE_POSTGRES") else pytest.skip
     if not {"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB"} <= os.environ.keys():
-        pytest.skip("no Postgres credentials (.env)")
+        unavailable("no Postgres credentials (.env or environment)")
     try:
         admin = watermark.connect()
     except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres not reachable: {exc}")
+        unavailable(f"Postgres not reachable: {exc}")
     schema = f"test_metrics_{uuid.uuid4().hex[:8]}"
     admin.execute(f'CREATE SCHEMA "{schema}"')
 
