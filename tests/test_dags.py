@@ -35,7 +35,21 @@ def uris(assets):
 
 def test_dags_import_cleanly(dagbag):
     assert dagbag.import_errors == {}
-    assert set(dagbag.dag_ids) == {"ingest_openalex", "refresh_openalex", "bronze_to_silver", "silver_to_gold"}
+    assert set(dagbag.dag_ids) == {
+        "ingest_openalex",
+        "refresh_openalex",
+        "bronze_to_silver",
+        "silver_to_gold",
+        "pipeline_health",
+    }
+
+
+def test_health_runs_daily_after_the_nightly_chain_without_retries(dagbag):
+    dag = dagbag.dags["pipeline_health"]
+    assert dag.timetable.expression == "0 6 * * *"
+    assert dag.max_active_runs == 1
+    assert dag.get_task("check").retries == 0
+    assert dag.get_task("check").outlets == []
 
 
 def as_list(callback):
