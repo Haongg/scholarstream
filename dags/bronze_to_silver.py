@@ -39,16 +39,26 @@ def bronze_to_silver():
     @task
     def transform() -> list[str]:
         from ingestion.bronze_writer import s3_client
+        from monitoring.metrics import DayMetric, record_days
         from transform.run import stale_days, transform_days
 
         s3 = s3_client()
         days = stale_days(s3)
-        transform_days(s3, days)
+        counts = transform_days(s3, days)
+        record_days(
+            get_current_context(),
+            "silver",
+            [
+                DayMetric(day, works, "transformed", f"{work_topics} work_topics, {topics} topics")
+                for day, (works, work_topics, topics) in counts.items()
+            ],
+        )
         return [d.isoformat() for d in days]
 
     @task(outlets=[SILVER_WORKS])
     def quality_gate(transformed: list[str]) -> None:
         from ingestion.bronze_writer import s3_client
+        from monitoring.metrics import DayMetric, record_days
         from quality.run import PASSED, gate, unchecked_days
 
         s3 = s3_client()
@@ -57,6 +67,14 @@ def bronze_to_silver():
         if not pending:
             raise AirflowSkipException("Every silver day has passed the gate")  # no event
         result = gate(s3, pending)
+        record_days(  # before failing, so a failed day's problems are on record too
+            get_current_context(),
+            "gate",
+            [
+                DayMetric(day, v.works, v.verdict, "; ".join(v.problems + v.warnings) or None)
+                for day, v in result.days.items()
+            ],
+        )
         if not result.ok:
             raise AirflowFailException("Quality gate failed; see log. Failed days stay unchecked.")
         # Deferred days (young, still settling) pass the gate unmarked; announce only marked ones.

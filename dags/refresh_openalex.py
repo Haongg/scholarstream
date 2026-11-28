@@ -34,6 +34,7 @@ def refresh_openalex():
     @task(outlets=[BRONZE_WORKS])
     def refresh() -> list[str]:
         from ingestion.run import ingest, lookback_days, refresh_days, refresh_window
+        from monitoring.metrics import record_ingest
 
         context = get_current_context()
         run_date = (context.get("logical_date") or context["dag_run"].run_after).date()
@@ -45,6 +46,7 @@ def refresh_openalex():
         else:
             log.info("Refreshing %s..%s", *window)
             result = ingest(*window)  # CountMismatch raises and fails the task, so no event
+            record_ingest(context, result)  # best-effort: never fails the task
             if result.budget_exhausted:
                 log.warning("API budget spent after %d day(s); the rest is refreshed next week", len(result.loaded))
             days = [d.isoformat() for d in result.loaded]

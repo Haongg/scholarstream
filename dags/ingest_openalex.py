@@ -44,8 +44,11 @@ def ingest_openalex():
         start = date.fromisoformat(params["start"]) if params.get("start") else None
         end = date.fromisoformat(params["end"]) if params.get("end") else run_date - timedelta(days=1)
 
+        from monitoring.metrics import record_ingest
+
         # NoWatermark / CountMismatch raise and fail the task, so no event is emitted.
         result = load(start, end)
+        record_ingest(context, result)  # best-effort: never fails the task
         if result.budget_exhausted:
             # Not a failure: retrying before 00:00 UTC is pointless, and the next scheduled
             # run starts right after the reset and continues from the watermark.

@@ -72,3 +72,10 @@ def test_gold_is_triggered_only_by_checked_silver_and_emits_gold(dagbag):
     assert {a.uri for a in dag.timetable.asset_condition.objects} == {"s3://silver/works"}
     assert dag.max_active_runs == 1  # one writer of the gold files at a time
     assert uris(dag.get_task("dbt_build").outlets) == {"s3://gold/"}
+
+
+def test_gold_metrics_run_after_the_build_and_announce_nothing(dagbag):
+    dag = dagbag.dags["silver_to_gold"]
+    metrics = dag.get_task("gold_metrics")
+    assert metrics.upstream_task_ids == {"dbt_build"}
+    assert metrics.outlets == []  # GOLD comes from dbt_build alone

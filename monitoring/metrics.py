@@ -158,6 +158,18 @@ def record_days(context: Mapping, layer: str, metrics: list[DayMetric], **task_f
     return best_effort(f"{layer} metrics of {key.dag_id}.{key.task_id}", write)
 
 
+def record_ingest(context: Mapping, result) -> bool:
+    """Record an ingestion.run.IngestResult: works per bronze day and the API credits."""
+    return record_days(
+        context,
+        "bronze",
+        [DayMetric(day, works, "loaded") for day, works in result.works.items()],
+        credits_used=result.credits_used,
+        credits_remaining=result.credits_remaining,
+        budget_exhausted=result.budget_exhausted,
+    )
+
+
 def record_status(context: Mapping, status: str, finished_at: datetime, error: str | None = None) -> bool:
     """Record a task run's outcome and timing; called from the task callbacks."""
     ti = context["ti"]
