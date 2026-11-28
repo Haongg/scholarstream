@@ -1,6 +1,12 @@
 from datetime import date, datetime
 
-from transform.silver import latest_versions, rebuild_abstract, short_id, to_tables
+from transform.silver import (
+    SILVER_TABLES,
+    latest_versions,
+    rebuild_abstract,
+    short_id,
+    to_tables,
+)
 
 
 def raw_topic(topic_id: str, score: float, subfield=("1707", "Computer Vision and Pattern Recognition")) -> dict:
@@ -138,3 +144,125 @@ def test_topics_table_tolerates_missing_hierarchy():
 
     row = topic_dim.row(0, named=True)
     assert row["topic_id"] == "T1" and row["subfield_id"] is None and row["domain_name"] is None
+
+
+def raw_institution(inst_id="I1", name="Google (United States)", country="US") -> dict:
+    return {
+        "id": f"https://openalex.org/{inst_id}",
+        "display_name": name,
+        "ror": "https://ror.org/00njsd438",
+        "country_code": country,
+        "type": "company",
+        "lineage": [f"https://openalex.org/{inst_id}"],
+    }
+
+
+def raw_authorship(author_id="A1", position="first", institutions=(), name=None, **overrides) -> dict:
+    authorship = {
+        "author_position": position,
+        "author": {
+            "id": f"https://openalex.org/{author_id}" if author_id else None,
+            "display_name": name or f"Author {author_id}",
+            "orcid": "https://orcid.org/0000-0001-2345-6789" if author_id else None,
+        },
+        "institutions": list(institutions),
+        "is_corresponding": position == "first",
+        "raw_author_name": f"raw {author_id}",
+        "raw_affiliation_strings": ["Google, Mountain View"] if institutions else [],
+    }
+    authorship.update(overrides)
+    return authorship
+
+
+def test_work_authorships_keep_byline_order_and_flags():
+    work = raw_work(authorships=[raw_authorship("A1", "first", [raw_institution()]), raw_authorship("A2", "last")])
+
+    slots = to_tables([work])["work_authorships"]
+
+    assert slots.rows(named=True) == [
+        {
+            "work_id": "W1", "author_order": 1, "author_id": "A1", "author_position": "first",
+            "is_corresponding": True, "raw_author_name": "raw A1",
+            "raw_affiliation_strings": ["Google, Mountain View"],
+        },
+        {
+            "work_id": "W1", "author_order": 2, "author_id": "A2", "author_position": "last",
+            "is_corresponding": False, "raw_author_name": "raw A2", "raw_affiliation_strings": [],
+        },
+    ]
+
+
+def test_slot_without_author_id_is_kept_but_not_described():
+    work = raw_work(authorships=[raw_authorship("A1"), raw_authorship(None, "last")])
+
+    tables = to_tables([work])
+
+    assert tables["work_authorships"]["author_id"].to_list() == ["A1", None]
+    assert tables["authors"]["author_id"].to_list() == ["A1"]
+
+
+def test_same_author_in_two_slots_keeps_both_slots_one_author_row():
+    work = raw_work(authorships=[raw_authorship("A1", "middle"), raw_authorship("A1", "middle")])
+
+    tables = to_tables([work])
+
+    assert tables["work_authorships"]["author_order"].to_list() == [1, 2]
+    assert tables["authors"].height == 1
+
+
+def test_slot_with_several_institutions_links_each_once():
+    google, mit = raw_institution("I1"), raw_institution("I2", "MIT")
+    work = raw_work(authorships=[raw_authorship("A1", institutions=[google, mit, google])])
+
+    tables = to_tables([work])
+
+    assert tables["authorship_institutions"].rows() == [("W1", 1, "I1"), ("W1", 1, "I2")]
+    assert tables["institutions"].row(0, named=True) == {
+        "institution_id": "I1",
+        "institution_name": "Google (United States)",
+        "ror": "00njsd438",
+        "country_code": "US",
+        "institution_type": "company",
+    }
+    assert tables["institutions"].height == 2
+
+
+def test_authors_shared_by_works_are_one_row_with_short_orcid():
+    w1 = raw_work("https://openalex.org/W1", authorships=[raw_authorship("A1")])
+    w2 = raw_work("https://openalex.org/W2", authorships=[raw_authorship("A1")])
+
+    authors = to_tables([w1, w2])["authors"]
+
+    assert authors.rows() == [("A1", "Author A1", "0000-0001-2345-6789")]
+
+
+def test_author_with_two_names_keeps_both_rows_for_the_gate():
+    w1 = raw_work("https://openalex.org/W1", authorships=[raw_authorship("A1", name="Ann Lee")])
+    w2 = raw_work("https://openalex.org/W2", authorships=[raw_authorship("A1", name="A. Lee")])
+
+    assert sorted(to_tables([w1, w2])["authors"]["author_name"].to_list()) == ["A. Lee", "Ann Lee"]
+
+
+def test_work_without_authorships_has_no_slots():
+    tables = to_tables([raw_work(authorships=None), raw_work("https://openalex.org/W2", authorships=[])])
+
+    assert tables["works"].height == 2
+    assert tables["work_authorships"].is_empty()
+    assert "raw_affiliation_strings" in tables["work_authorships"].columns
+
+
+def test_authorships_come_from_the_latest_version_only():
+    old = raw_work(updated="2026-10-01T10:00:00", authorships=[raw_authorship("A9", institutions=[raw_institution("I9")])])
+    new = raw_work(updated="2026-10-05T10:00:00", authorships=[raw_authorship("A1")])
+
+    tables = to_tables([old, new])
+
+    assert tables["work_authorships"]["author_id"].to_list() == ["A1"]
+    assert tables["authors"]["author_id"].to_list() == ["A1"]
+    assert tables["institutions"].is_empty() and tables["authorship_institutions"].is_empty()
+
+
+def test_silver_tables_end_with_work_topics():
+    # transform writes in this order; stale_days reads work_topics' timestamp as "finished".
+    assert list(to_tables([raw_work()])) == list(SILVER_TABLES)
+    assert SILVER_TABLES[-1] == "work_topics"
