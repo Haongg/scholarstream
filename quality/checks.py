@@ -84,6 +84,74 @@ def check_topic_dimension(work_topics: pl.DataFrame, topics: pl.DataFrame) -> li
     return problems
 
 
+AUTHOR_POSITIONS = ("first", "middle", "last")
+
+
+def check_authorships_shape(works: pl.DataFrame, slots: pl.DataFrame) -> list[str]:
+    """work_authorships: one row per (work_id, author_order) of an existing work, a known
+    position, and exactly one first author per work that has authors.
+
+    Deliberately not failures: a slot without author_id (~0.7%), a work without authors, the
+    same author in two slots of one work. All occur in OpenAlex and gold keeps them."""
+    problems = []
+    nulls = slots.filter(pl.col("work_id").is_null() | pl.col("author_order").is_null()).height
+    if nulls:
+        problems.append(f"{nulls} work_authorships rows have a null work_id or author_order")
+    orphans = slots.filter(pl.col("work_id").is_not_null()).join(works.select("work_id"), on="work_id", how="anti")
+    if not orphans.is_empty():
+        problems.append(f"{len(orphans)} work_authorships rows point to a work missing from works")
+    duplicates = slots.select("work_id", "author_order").is_duplicated().sum()
+    if duplicates:
+        problems.append(f"{duplicates} work_authorships rows repeat a (work_id, author_order) pair")
+    bad_position = slots.filter(~pl.col("author_position").is_in(AUTHOR_POSITIONS).fill_null(False)).height
+    if bad_position:
+        problems.append(f"{bad_position} work_authorships rows have a position outside {'/'.join(AUTHOR_POSITIONS)}")
+    not_one_first = (
+        slots.group_by("work_id")
+        .agg((pl.col("author_position") == "first").sum().alias("firsts"))
+        .filter(pl.col("firsts") != 1)
+        .height
+    )
+    if not_one_first:
+        problems.append(f"{not_one_first} works with authors do not have exactly one first author")
+    return problems
+
+
+def check_authorship_institutions(slots: pl.DataFrame, links: pl.DataFrame) -> list[str]:
+    """authorship_institutions: each link names an institution and belongs to an existing slot."""
+    problems = []
+    null_ids = links["institution_id"].null_count()
+    if null_ids:
+        problems.append(f"{null_ids} authorship_institutions rows have a null institution_id")
+    duplicates = links.is_duplicated().sum()
+    if duplicates:
+        problems.append(f"{duplicates} authorship_institutions rows are repeated")
+    orphans = links.join(slots.select("work_id", "author_order"), on=["work_id", "author_order"], how="anti").height
+    if orphans:
+        problems.append(f"{orphans} authorship_institutions rows point to an author slot missing from work_authorships")
+    return problems
+
+
+def check_dimension(table: str, dim: pl.DataFrame, id_column: str, required: tuple[str, ...], used: pl.Series) -> list[str]:
+    """A day's dimension table: one row per id (a conflicting record shows up as two), the
+    `required` columns filled, and every non-null id in `used` described."""
+    problems = []
+    nulls = dim[id_column].null_count()
+    if nulls:
+        problems.append(f"{nulls} {table} rows have a null {id_column}")
+    conflicting = dim.filter(pl.col(id_column).is_not_null() & pl.col(id_column).is_duplicated())
+    if not conflicting.is_empty():
+        ids = conflicting[id_column].unique().sort().to_list()
+        problems.append(f"{len(ids)} {table} appear with conflicting records: {', '.join(ids[:5])}")
+    incomplete = dim.filter(pl.any_horizontal(pl.col(c).is_null() for c in required)).height
+    if incomplete:
+        problems.append(f"{incomplete} {table} rows miss {' or '.join(required)}")
+    undescribed = used.drop_nulls().unique().is_in(dim[id_column].drop_nulls().implode()).not_().sum()
+    if undescribed:
+        problems.append(f"{undescribed} {id_column}s in use are missing from {table}")
+    return problems
+
+
 def check_publication_date(works: pl.DataFrame, day: date, today: date) -> list[str]:
     problems = []
     null_dates = works["publication_date"].null_count()
@@ -169,11 +237,20 @@ def run_checks(
     `tables`: the day's silver tables by name (transform.silver.SILVER_TABLES);
     `counts`: works per day."""
     works, topics, topic_dim = tables["works"], tables["work_topics"], tables["topics"]
+    slots, links = tables["work_authorships"], tables["authorship_institutions"]
     return {
         "work_id not null and unique": check_work_id(works),
         "topics reference works": check_topics_reference_works(works, topics),
         "topics shape": check_topics_shape(works, topics),
         "topic dimension": check_topic_dimension(topics, topic_dim),
+        "authorships shape": check_authorships_shape(works, slots),
+        "authorship institutions": check_authorship_institutions(slots, links),
+        "author dimension": check_dimension(
+            "authors", tables["authors"], "author_id", ("author_name",), slots["author_id"]
+        ),
+        "institution dimension": check_dimension(
+            "institutions", tables["institutions"], "institution_id", ("institution_name",), links["institution_id"]
+        ),
         "publication date": check_publication_date(works, day, today),
         ROW_COUNT_CHECK: check_row_count(day, len(works), counts),
     }
