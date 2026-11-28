@@ -2,6 +2,7 @@
 
     python -m ingestion.run                       # lookback window + everything after the watermark
     python -m ingestion.run --from 2026-10-01 --to 2026-10-03   # explicit range / backfill
+    python -m ingestion.run --refresh             # days older than the lookback window (weekly)
 
 Each day is complete or absent: pages are rewritten from scratch and the watermark only
 moves after a day finishes, so re-running a day never leaves duplicates. If the daily API
@@ -10,7 +11,9 @@ budget runs out, the run stops and the unfinished day is redone next time.
 OpenAlex indexes works days to weeks after their publication date, so a day loaded once
 is not final. Without --from, every run also re-fetches the last INGEST_LOOKBACK_DAYS days
 (default 7) ending at --to, picking up late arrivals; re-fetching is safe since days are
-rewritten whole.
+rewritten whole. Works keep arriving (or moving to another day) for weeks, so a weekly
+--refresh re-fetches the days just older than that window, up to INGEST_REFRESH_DAYS
+(default 60) back, at a fraction of the cost of a 60-day daily lookback.
 
 Each day is reconciled against OpenAlex's meta.count (same count on every page, total
 written equals it, no duplicate ids). A mismatch is retried once, then the run stops.
@@ -55,6 +58,28 @@ def resolve_start(last_loaded: date, end: date, lookback_days: int) -> date:
     if lookback_days <= 0:
         return after_watermark
     return min(after_watermark, end - timedelta(days=lookback_days - 1))
+
+
+# Measured 2026-11-22: ~6% of CS works appeared or changed day after leaving a 7-day window.
+DEFAULT_REFRESH_DAYS = 60  # ~30 credits/day for CS, so a weekly refresh costs ~1,600
+
+
+def refresh_days() -> int:
+    """How far back the weekly refresh reaches (INGEST_REFRESH_DAYS), counted from end."""
+    return int(os.getenv("INGEST_REFRESH_DAYS") or DEFAULT_REFRESH_DAYS)
+
+
+def refresh_window(end: date, lookback_days: int, refresh_days: int) -> tuple[date, date] | None:
+    """Days older than the lookback window ending at end, back to refresh_days before end.
+
+    The daily run already covers [end - lookback + 1, end], so the refresh starts right
+    before it and the two never fetch the same day. None if the lookback covers it all.
+    """
+    window_end = end - timedelta(days=max(lookback_days, 0))
+    window_start = end - timedelta(days=refresh_days - 1)
+    if window_start > window_end:
+        return None
+    return window_start, window_end
 
 
 class CountMismatch(Exception):
@@ -151,15 +176,31 @@ def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--from", dest="start", type=date.fromisoformat)
     parser.add_argument("--to", dest="end", type=date.fromisoformat)
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="re-fetch the days older than the lookback window, up to INGEST_REFRESH_DAYS before --to",
+    )
+    args = parser.parse_args(argv)
+    if args.refresh and args.start:
+        parser.error("--refresh sets its own start; use --to to move the window")
+    return args
 
 
 def main(argv=None) -> int:
     load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args(argv)
+    start, end = args.start, args.end
+    if args.refresh:
+        end = end or datetime.now(UTC).date() - timedelta(days=1)
+        window = refresh_window(end, lookback_days(), refresh_days())
+        if window is None:
+            log.info("Nothing to refresh: the lookback window already covers %d days", refresh_days())
+            return 0
+        start, end = window
     try:
-        result = ingest(args.start, args.end)
+        result = ingest(start, end)
     except NoWatermark as exc:
         log.error("%s", exc)
         return 1

@@ -1,6 +1,6 @@
 """Tests for the meta.count reconciliation, completion marker and lookback in ingestion.run."""
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -9,6 +9,7 @@ from ingestion.run import (
     CountMismatch,
     ingest_day,
     ingest_day_with_retry,
+    refresh_window,
     resolve_start,
 )
 
@@ -150,6 +151,35 @@ def test_watermark_older_than_lookback_wins():
 
 def test_lookback_zero_starts_after_watermark():
     assert resolve_start(last_loaded=date(2026, 10, 19), end=END, lookback_days=0) == END
+
+
+def test_refresh_starts_right_before_the_lookback_window():
+    start, end = refresh_window(END, lookback_days=7, refresh_days=60)
+    lookback_start = resolve_start(last_loaded=END, end=END, lookback_days=7)
+
+    assert end == lookback_start - timedelta(days=1)  # adjacent: no gap, no day fetched twice
+    assert start == END - timedelta(days=59)  # together they cover the last 60 days
+    assert (end - start).days + 1 == 53
+
+
+def test_no_refresh_when_the_lookback_covers_it():
+    assert refresh_window(END, lookback_days=60, refresh_days=60) is None
+
+
+def test_cli_refresh_loads_the_window_before_to(monkeypatch):
+    calls = []
+    monkeypatch.setattr(run, "ingest", lambda start, end: calls.append((start, end)) or run.IngestResult())
+    monkeypatch.setattr(run, "load_dotenv", lambda: None)
+    monkeypatch.setenv("INGEST_LOOKBACK_DAYS", "7")
+    monkeypatch.setenv("INGEST_REFRESH_DAYS", "60")
+
+    assert run.main(["--refresh", "--to", END.isoformat()]) == 0
+    assert calls == [(date(2026, 8, 22), date(2026, 10, 13))]
+
+
+def test_cli_refresh_rejects_from():
+    with pytest.raises(SystemExit):
+        run.parse_args(["--refresh", "--from", "2026-10-01"])
 
 
 @pytest.mark.parametrize(
