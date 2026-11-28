@@ -266,3 +266,35 @@ def test_corrupt_parquet_fails_without_crashing(use_s3, caplog):
         assert quality_run.main([]) == 1
 
     assert "works: unreadable parquet" in caplog.text
+
+
+def test_gate_result_reports_each_days_verdict(monkeypatch):
+    monkeypatch.setenv("INGEST_LOOKBACK_DAYS", "7")
+    young, old, big = TODAY - timedelta(days=1), TODAY - timedelta(days=8), TODAY - timedelta(days=10)
+    broken = TODAY - timedelta(days=20)
+    objects = {
+        **weekly_history(young, 20), **good_day(young, 2),  # short but settling
+        **weekly_history(old, 20), **good_day(old, 2),  # short and final
+        **weekly_history(big, 4), **good_day(big, 20),  # far above: passes with a warning
+        **good_day(broken),
+    }
+    del objects[key("work_topics", broken)]
+    result = quality_run.gate(FakeS3(objects), [young, old, big, broken])
+
+    assert not result.ok
+    verdicts = {d: v.verdict for d, v in result.days.items()}
+    assert verdicts == {young: "deferred", old: "failed", big: "passed", broken: "failed"}
+    assert result.with_verdict("passed") == [big]
+    assert result.days[young].works == 2
+    assert result.days[young].problems[0].startswith("row count vs same weekday: ")
+    assert result.days[big].warnings[0].startswith("row count far above same weekday: ")
+    assert result.days[broken].problems == ["silver tables readable: work_topics: NoSuchKey"]
+
+
+def test_gate_result_is_ok_when_only_deferred(monkeypatch):
+    monkeypatch.setenv("INGEST_LOOKBACK_DAYS", "7")
+    young = TODAY - timedelta(days=1)
+    result = quality_run.gate(FakeS3({**weekly_history(young, 20), **good_day(young, 2)}), [young])
+
+    assert result.ok
+    assert result.with_verdict("passed") == []

@@ -49,17 +49,18 @@ def bronze_to_silver():
     @task(outlets=[SILVER_WORKS])
     def quality_gate(transformed: list[str]) -> None:
         from ingestion.bronze_writer import s3_client
-        from quality.run import gate, is_checked, unchecked_days
+        from quality.run import PASSED, gate, unchecked_days
 
         s3 = s3_client()
         pending = unchecked_days(s3)
         log.info("Transformed %d day(s); %d silver day(s) await the gate", len(transformed), len(pending))
         if not pending:
             raise AirflowSkipException("Every silver day has passed the gate")  # no event
-        if not gate(s3, pending):
+        result = gate(s3, pending)
+        if not result.ok:
             raise AirflowFailException("Quality gate failed; see log. Failed days stay unchecked.")
         # Deferred days (young, still settling) pass the gate unmarked; announce only marked ones.
-        passed = [d.isoformat() for d in pending if is_checked(s3, d)]
+        passed = [d.isoformat() for d in result.with_verdict(PASSED)]
         if not passed:
             raise AirflowSkipException("Only settling days were checked; nothing new for gold")
         get_current_context()["outlet_events"][SILVER_WORKS].extra = {"days": passed}

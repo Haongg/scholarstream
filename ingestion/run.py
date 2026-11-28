@@ -132,6 +132,9 @@ class NoWatermark(Exception):
 class IngestResult:
     loaded: list[date] = field(default_factory=list)  # days written, reconciled and marked
     budget_exhausted: bool = False  # stopped early; the remaining days wait for the next run
+    works: dict[date, int] = field(default_factory=dict)  # works written per loaded day
+    credits_used: int = 0  # API requests that succeeded, retried days included
+    credits_remaining: int | None = None  # budget left after the run, if OpenAlex reported it
 
 
 def ingest(start: date | None = None, end: date | None = None) -> IngestResult:
@@ -158,18 +161,28 @@ def ingest(start: date | None = None, end: date | None = None) -> IngestResult:
 
         client = OpenAlexClient(os.getenv("OPENALEX_API_KEY"), os.getenv("OPENALEX_MAILTO"))
         writer = BronzeWriter()
+        load_days(client, writer, watermark, start, end, result)
+    return result
+
+
+def load_days(client, writer, watermark, start: date, end: date, result: IngestResult) -> None:
+    """Load each day of [start, end] into result, stopping early on a spent budget."""
+    try:
         for day in daterange(start, end):
             try:
                 works = ingest_day_with_retry(client, writer, day)
             except BudgetExhausted as exc:
                 log.warning("Stopping at %s: %s. Re-run after the budget resets.", day, exc)
                 result.budget_exhausted = True
-                return result
+                return
             # A CountMismatch propagates: the watermark stays put, so the next run redoes the day.
             watermark.advance(day)
             result.loaded.append(day)
+            result.works[day] = works
             log.info("Loaded %s: %d works", day, works)
-    return result
+    finally:
+        result.credits_used = client.requests
+        result.credits_remaining = client.credits_remaining
 
 
 def parse_args(argv):

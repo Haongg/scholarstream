@@ -22,6 +22,7 @@ import argparse
 import io
 import logging
 import sys
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 
 import polars as pl
@@ -84,9 +85,33 @@ def try_read(s3, table: str, day: date) -> tuple[pl.DataFrame | None, str | None
         return None, f"{table}: unreadable parquet ({type(error).__name__})"
 
 
-def gate(s3, days: list[date]) -> bool:
-    """Check the given silver days and mark each one that passes; True if none failed
-    (deferred days do not count as failed). Used by the CLI and the DAG."""
+PASSED, DEFERRED, FAILED = "passed", "deferred", "failed"
+
+
+@dataclass
+class DayVerdict:
+    verdict: str  # passed (and marked), deferred (settling, unmarked) or failed
+    works: int | None  # None if the works table could not be read
+    problems: list[str] = field(default_factory=list)  # failing (or deferring) checks
+    warnings: list[str] = field(default_factory=list)  # non-blocking
+
+
+@dataclass
+class GateResult:
+    days: dict[date, DayVerdict] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        """Nothing failed; deferred days are allowed."""
+        return all(v.verdict != FAILED for v in self.days.values())
+
+    def with_verdict(self, verdict: str) -> list[date]:
+        return [d for d, v in self.days.items() if v.verdict == verdict]
+
+
+def gate(s3, days: list[date]) -> GateResult:
+    """Check the given silver days and mark each one that passes. `.ok` is True if none
+    failed (deferred days do not count as failed). Used by the CLI and the DAG."""
     today = datetime.now(UTC).date()
     lookback = lookback_days()
 
@@ -98,24 +123,26 @@ def gate(s3, days: list[date]) -> bool:
         if works is not None:
             counts[d] = works.height
 
-    failed = False
-    deferred = []
+    result = GateResult()
     for day in days:
         log.info("== %s", day)
         works, works_error = try_read(s3, "works", day)
         topics, topics_error = try_read(s3, "work_topics", day)
         topic_dim, topic_dim_error = try_read(s3, "topics", day)
         if works is None or topics is None or topic_dim is None:
-            failed = True
+            reasons = [r for r in (works_error, topics_error, topic_dim_error) if r]
             log.error("FAIL silver tables readable")
-            for reason in (works_error, topics_error, topic_dim_error):
-                if reason:
-                    log.error("     - %s", reason)
+            for reason in reasons:
+                log.error("     - %s", reason)
+            result.days[day] = DayVerdict(
+                FAILED, works.height if works is not None else None, [f"silver tables readable: {r}" for r in reasons]
+            )
             continue
         log.info("   %d works, %d work_topics, %d topics", works.height, topics.height, topic_dim.height)
         results = run_checks(works, topics, day, today, counts, topic_dim)
         failing = {name for name, problems in results.items() if problems}
         defer = failing == {ROW_COUNT_CHECK} and is_settling(day, today, lookback)
+        verdict = DayVerdict(DEFERRED if defer else FAILED if failing else PASSED, works.height)
         for name, problems in results.items():
             if not problems:
                 log.info("ok   %s", name)
@@ -124,23 +151,24 @@ def gate(s3, days: list[date]) -> bool:
             log.log(level, "%s %s", label, name)
             for problem in problems:
                 log.log(level, "      - %s", problem)
+                verdict.problems.append(f"{name}: {problem}")
         for name, warnings in run_warnings(works, day, counts).items():
             for warning in warnings:
                 log.warning("WARN  %s: %s (not blocking; gold filters it)", name, warning)
+                verdict.warnings.append(f"{name}: {warning}")
         if defer:
-            deferred.append(day)
             log.warning("      %s is within the %d-day lookback window: left unmarked, re-checked next run", day, lookback)
-        elif failing:
-            failed = True
-        else:
+        elif not failing:
             mark_checked(s3, day)
+        result.days[day] = verdict
+    deferred = result.with_verdict(DEFERRED)
     if deferred:
         log.warning("Deferred (still settling, not in gold yet): %s", ", ".join(d.isoformat() for d in deferred))
-    if failed:
+    if not result.ok:
         log.error("Quality gate FAILED: do not promote to gold")
-        return False
-    log.info("Quality gate passed")
-    return True
+    else:
+        log.info("Quality gate passed")
+    return result
 
 
 def main(argv=None) -> int:
@@ -158,7 +186,7 @@ def main(argv=None) -> int:
     if not days:
         log.info("No silver partitions in range")
         return 0
-    return 0 if gate(s3, days) else 1
+    return 0 if gate(s3, days).ok else 1
 
 
 if __name__ == "__main__":

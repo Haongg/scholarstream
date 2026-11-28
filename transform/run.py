@@ -112,10 +112,13 @@ def stale_days(s3) -> list[date]:
     return stale
 
 
-def transform_days(s3, days: list[date]) -> None:
+def transform_days(s3, days: list[date]) -> dict[date, tuple[int, int, int]]:
+    """Transform each day; returns its (works, work_topics, topics) row counts."""
+    counts = {}
     for day in days:
-        works, work_topics, topics = transform_day(s3, day)
+        counts[day] = works, work_topics, topics = transform_day(s3, day)
         log.info("Silver %s: %d works, %d work_topics, %d topics", day, works, work_topics, topics)
+    return counts
 
 
 def main(argv=None) -> int:
