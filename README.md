@@ -66,22 +66,26 @@ All stages are orchestrated by **Apache Airflow**.
   - Reconstructs abstracts from OpenAlex's `abstract_inverted_index` format
   - Deduplicates records, keeping the latest version per `work_id`
   - Flattens nested topic arrays into a many-to-many table
+  - Splits authorships into one row per author slot (byline order) and a slot → institution table, plus the day's authors and institutions; slots without an author id and raw affiliation strings are kept
 
 ### 3. Data quality gate
 Plain Polars checks run on each silver day before it is promoted to gold. A day that passes gets a `_QUALITY_OK` marker; if any check fails, the DAG stops. Checks include:
 - `work_id` uniqueness and not-null constraints
 - Referential integrity between works and topics, and a complete topic hierarchy
+- Author slots unique per work with exactly one first author, institution links on existing slots, and one record per author and institution
 - Publication date equal to the partition day and not in the future
 - Row count against the median of the same weekday over the previous 4 weeks
 
 ### 4. Gold layer (dbt)
 dbt + DuckDB builds a star schema as Parquet in the `gold` bucket, reading **only silver days marked `_QUALITY_OK`**. Tables are rebuilt in full on every run, so a re-run is idempotent:
 - `fact_work_topics`: one row per (work, topic), with rank and a primary-topic flag
-- `dim_works` (one row per work, with `has_abstract`), `dim_topics` (subfield → field → domain), `dim_date`
+- `fact_work_authors`: one row per author slot of a work, in byline order, with position and corresponding-author flag; `author_id` is null for the ~0.7% of slots OpenAlex did not resolve, so rows per work still count its authors
+- `fact_authorship_institutions`: bridge from an author slot to each of its institutions (a slot may have several, or none)
+- `dim_works` (one row per work, with `has_abstract`), `dim_topics` (subfield → field → domain), `dim_authors` (name, ORCID), `dim_institutions` (name, ROR, country, type), `dim_date`
 
-dbt tests check keys, relationships from the fact to every dimension, the fact grain, exactly one primary topic per work, and that no unchecked day reaches gold.
+dbt tests check keys, relationships from each fact to its dimensions, the fact grains, exactly one primary topic and one first author per work, that no unchecked day reaches gold, and that every checked day has all silver tables (a day written before a table existed fails the build rather than going missing).
 
-Planned: `dim_authors`, `dim_institutions`, and marts such as topic trends by year.
+Planned: marts such as weekly topic trends.
 
 ### 5. Pipeline monitoring
 Every DAG records what it did in two Postgres tables, next to the watermark:
