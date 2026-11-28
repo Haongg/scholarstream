@@ -83,13 +83,22 @@ dbt tests check keys, relationships from the fact to every dimension, the fact g
 
 Planned: `dim_authors`, `dim_institutions`, and marts such as topic trends by year.
 
-### 5. ML pipeline
+### 5. Pipeline monitoring
+Every DAG records what it did in two Postgres tables, next to the watermark:
+- `pipeline_task_runs`: one row per task run, with status, start/finish time, try number, the error of a failed try, and the OpenAlex credits used and left
+- `pipeline_day_metrics`: one row per task run, layer and publication day, with the row count and the verdict (`loaded`, `transformed`, `passed` / `deferred` / `failed` with the gate's reasons, `built`)
+
+Writes are upserts on the run's key, so a retried or re-run task replaces its rows instead of adding new ones, and they are best-effort: a failure to record metrics never stops the pipeline.
+
+Shared task callbacks record each outcome. A final failure also logs an `ALERT` line (alerts go to the log only for now); a retry is only a warning. A daily `pipeline_health` DAG (06:00 UTC) checks results rather than task states, so it also catches a pipeline that stopped without failing: the latest gold day is at most 3 days old, the last successful ingest at most 26 hours old, no silver day past the lookback window still lacks `_QUALITY_OK`, and the API budget did not run out twice in a row. It runs inside the same Airflow, so during a full outage it cannot run either and reports the gap once the stack is back; an outside heartbeat is planned with the move to the cloud.
+
+### 6. ML pipeline
 - **Task split:** the top-N topics are divided into sequential tasks (e.g. 10 tasks × 10 topics), simulating new topics arriving over time
 - **Embeddings:** computed once with a frozen scientific-text encoder (SPECTER2); only daily new records are embedded afterwards
 - **Incremental training:** a lightweight multi-label classifier trained task by task, using a replay buffer of past samples and pseudo-labels for old topics. The design is inspired by KBK (Knowing Beyond the Known)
 - **Cost-aware design:** GPU is needed only for the one-time historical backfill; steady-state embedding and training run on CPU
 
-### 6. Serving & monitoring
+### 7. Serving & monitoring
 - FastAPI endpoint: input an abstract, get predicted topics with confidence scores
 - Prediction logs are stored and monitored for distribution shifts and low-confidence rates
 
@@ -102,6 +111,7 @@ Planned: `dim_authors`, `dim_institutions`, and marts such as topic trends by ye
 ├── transform/             # Polars bronze → silver jobs
 ├── dbt/                   # dbt project: staging + gold models, tests
 ├── quality/               # Quality gate between silver and gold (Polars)
+├── monitoring/            # Run metrics (Postgres), task callbacks, pipeline health checks
 ├── ml/
 │   ├── embeddings/        # Embedding computation
 │   └── training/          # Incremental training, replay buffer
@@ -135,7 +145,7 @@ docker compose up -d
 Then open:
 - Airflow UI: http://localhost:8080
 - MinIO console: http://localhost:9001
-Trigger the `ingest_openalex` DAG to start the pipeline (`refresh_openalex` re-fetches older days every Sunday); `bronze_to_silver` (with the quality gate) runs after it, then `silver_to_gold` (dbt build + tests) once new silver days pass the gate.
+Trigger the `ingest_openalex` DAG to start the pipeline (`refresh_openalex` re-fetches older days every Sunday); `bronze_to_silver` (with the quality gate) runs after it, then `silver_to_gold` (dbt build + tests) once new silver days pass the gate. Unpause `pipeline_health` for the daily health check (new DAGs start paused); `python -m monitoring.health [--as-of YYYY-MM-DD]` runs the same checks from the shell.
 
 ### Build and test gold
 
